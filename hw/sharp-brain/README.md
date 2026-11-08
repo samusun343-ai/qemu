@@ -1,0 +1,171 @@
+# Sharp Brain virtualization for QEMU (i.MX28 family)
+
+This directory implements full-machine virtualization of the SHARP Brain
+series of Windows CE electronic dictionaries, built around the
+NXP (Freescale) i.MX283 SoC (ARM926EJ-S @ 454 MHz, ARMv5TEJ).
+
+The machine is named after the Brain product lineages. PW-AJ2 belongs to
+the same hardware platform as PW-SH6 (both are 4th-generation, 854x480
+"wide VGA+" models); they are modelled by the `pw-sh6` machine, with
+`pw-aj2` as an alias. Machines for other lineages (pw-sh1..sh5, pw-sa*,
+pw-sj*, pw-hc* ...) share the same SoC implementation and differ in board
+data (LCD panel, keyboard matrix, touch wiring).
+
+## Implemented / planned machines
+
+| machine      | alias       | lineage      | LCD        | RAM   | notes |
+|--------------|-------------|--------------|------------|-------|-------|
+| `pw-sh6`     | `pw-aj2`, `sharp-brain` | SH6 platform | 854x480 16bpp | 128MB | eMMC + microSD, DUART console |
+| (future) `pw-sh1`..`pw-sh5` | -    | 3rd gen      | 800x480    | 128MB | mostly same board data |
+
+## Booting
+
+    qemu-system-arm -M pw-aj2 \
+        -drive if=sd,index=0,file=emmc.img,format=raw \
+        [-drive if=sd,index=1,file=sd.img,format=raw] \
+        -serial mon:stdio -display vnc=:1
+
+`if=sd,index=0` is the on-board eMMC (SSP0, 8-bit bus, TYPE_EMMC),
+`index=1` is the microSD slot (SSP1, 4-bit bus).
+
+## i.MX28 boot chain (reverse engineered from the PW-AJ2 eMMC dump)
+
+The boot flow was reconstructed by analysing the eMMC image shipped at
+`samusun343-ai/wince-imgs` release tag `emmc` (`sharp-brain-pw-aj2-emmc`,
+6,605,935,104 bytes) and cross-checked against the brain-hackers
+`u-boot.brain`/`buildbrain` artifacts.
+
+### eMMC layout (user area)
+
+| LBA range        | contents |
+|------------------|----------|
+| 0                | MBR (see partitions below) |
+| 1                | `STMP`-style marker: `STMP`, major=1, minor=0, imageBlocks=0x104 (=260) - unused by the boot flow |
+| 256..1279        | **partition type 0x53 (SigmaTel boot partition)**: 4-sector boot config block + boot slots |
+| 260..594         | boot slot A: `[20B SHA1 digest][SB v1.1 boot image]` (335 sectors) |
+| 1284..1618       | boot slot B: identical copy of slot A (A/B redundancy) |
+| 2304..67839      | partition type 0x10: Windows CE OS image (32MB) |
+| 598031..1624063  | partition type 0x0E: FAT16 (501MB) |
+| 1624073..        | partition type 0x0B: FAT32 (5.5GB) - user/dictionary data |
+
+### Boot config block (type 0x53 partition, LBA 256)
+
+Same structure as u-boot's `mx28_create_sd_image()` output
+(`struct mx28_sd_config_block`):
+
+    +0x00  magic 0x00112233
+    +0x04  primary boot tag  (1)
+    +0x08  secondary boot tag (2)
+    +0x0C  number of copies  (2)
+    +0x18  slot[0]: tag=1, first_sector=0x104 (260), sector_count=0x14f (335)
+    +0x2C  slot[1]: tag=2, first_sector=0x504 (1284), sector_count=0x14f
+
+### SB (Secure Boot, "Encore/Piano") image format
+
+The SB file layout follows Freescale's elftosb `EncoreBootImage`:
+
+* 20-byte SHA1 digest header (doubles as AES CBC IV; first 16 bytes)
+* `STMP` signature, version 1.1, flags 0x0001
+* section table + DEK dictionary; sections are AES-128-CBC encrypted
+  with a data encryption key that itself is CBC-encrypted with the
+  **all-zero KEK** (the Brain parts have no OTP keys blown, which is why
+  community u-boot.sb images boot on real hardware)
+* boot commands: NOP(0x00) TAG(0x01) LOAD(0x02) FILL(0x03) JUMP(0x04)
+  CALL(0x05) MODE(0x06); command checksum = 0x5A + sum(bytes 1..15)
+
+### PW-AJ2 boot stream (slot A/B)
+
+    LOAD   0x00000004  0x2800    ; Stage0 preloader (10KB, IRAM) - DRAM/pinmux init
+    LOAD   0x00008000  0x20      ; IVT (HAB v4): entry=0x00000004, self=0x8000
+    CALL   0x00008000            ; ROM jumps to IVT entry (ARM), stage0 returns
+    LOAD   0x400b4000  0x43a     ; 1082-byte parameter block
+    LOAD   0x40060000  0x27000   ; Stage1 = EBOOT (Freescale i.MX28 WinCE BSP
+                                  ; bootloader, customized by Sharp)
+    LOAD   0x00008000  0x20      ; IVT: entry=0x40060000
+    CALL   0x00008000            ; EBOOT runs (never returns)
+
+EBOOT identifies itself as `SHARP   ED-AA2  V030  /  ED-SH6`, reads its
+boot configuration from eMMC, loads the Windows CE image (type 0x10
+partition) and jumps into the kernel. EBOOT also implements the
+firmware-update path that executes `EDSH6EXE.BIN` (nk.bin wrapper) from
+the microSD card - this is how brain-hackers' U-Boot/Linux gets started
+on real hardware.
+
+The 32-byte IVT at 0x8000 (HAB v4):
+
+    +0x00  tag 0xD1, length 0x20, version 0x40
+    +0x04  entry point (bit0 = Thumb)
+    +0x0C  DCD address (0 here)
+    +0x10  boot data address (0 here)
+    +0x14  self address (0x8000)
+
+## i.MX28 memory map (from linux-brain `imx28.dtsi`)
+
+| address | block |
+|---------|-------|
+| 0x00000000..0x0001ffff | IRAM 128KB (ROM shadow at reset) |
+| 0x40000000..0x47ffffff | DRAM (128MB on Brain) |
+| 0x80000000 | ICOLL interrupt collector |
+| 0x80004000 | APBH DMA controller (16 channels: SSP0-3=0-3, GPMI=4-11, HSADC=12, LCDIF=13) |
+| 0x80010000/0x80012000 | SSP0 (eMMC, 8-bit) / SSP1 (microSD, 4-bit) |
+| 0x80014000/0x80016000 | SSP2 (SPI sub-LCD) / SSP3 |
+| 0x80018000 | PINCTRL (with GPIO banks 0-4) |
+| 0x8001c000 | DIGCTL (microsecond counter at +0xc0) |
+| 0x80024000 | APBX DMA |
+| 0x80030000 | LCDIF (DMA channel 13, IRQ 38) |
+| 0x80040000 | CLKCTRL |
+| 0x80044000 | POWER |
+| 0x80050000 | LRADC (4-wire resistive touch on Brain) |
+| 0x80058000/0x8005a000 | I2C0 (SGTL5000 codec, keyboard ctrl on some models) / I2C1 |
+| 0x80068000 | TIMROT (IRQ 48-51) |
+| 0x8006a000..0x80072000 | AUART0-4 |
+| 0x80074000 | DUART - **ARM PL011** debug console (IRQ 47) |
+| 0x800e0000 | EMI/DRAM controller |
+| 0x800f0000 | FEC ethernet |
+
+Key IRQs: SSP0=96, SSP1=97, LCDIF=38, DUART=47, TIMROT=48-51,
+LRADC touch=10.
+
+All mxs register blocks use the 16-byte "stmp" layout
+`[REG, SET(+4), CLR(+8), TOG(+0xc)]`.
+
+### SSP (SD/MMC host) notes
+
+* Registers (16-byte spaced): CTRL0 0x00, CMD0 0x10, CMD1 0x20,
+  XFER_SIZE 0x30, BLOCK_SIZE 0x40, COMPREF 0x50, COMPMASK 0x60,
+  TIMING 0x70, CTRL1 0x80, DATA 0x90, SDRESP0-3 0xa0-0xd0, DDR_CTRL
+  0xe0, DLL_CTRL 0xf0, STATUS 0x100, DLL_STS 0x110.
+* Writing CTRL0 with RUN (bit 29) starts the command (u-boot
+  `mxsmmc.c` register-level path).
+* With DMA enabled (CTRL1.DMA_ENABLE), command issue happens through
+  APBH DMA PIO descriptors: pio_words[j] is written to
+  `SSP_base + 0x10*j` (CTRL0, CMD0, CMD1, XFER_SIZE...). The DMA
+  completion of the PIO descriptor effectively asserts RUN. Data then
+  flows between the SSP FIFO and memory through a DMA descriptor with
+  COMMAND=WRITE(1)/READ(2) + WAIT4END.
+* STATUS.CARD_DETECT (bit 28) reads 0 when a card is present.
+
+### Keyboard (PW-SH6 matrix, from linux-brain `imx28-pwsh6.dts`)
+
+8 rows (inputs, GPIO4_0..4_7, pulled up) x 7 columns (outputs:
+GPIO2_16..2_21 + GPIO4_8). Keys map to a standard PC-style map plus a
+`symbols` key (matrix 2,4) that acts as a modifier selecting the
+alternate blue legends (numbers/symbols) - the same trick the real
+hardware uses.
+
+Host keyboard -> guest mapping policy (per project requirements):
+plain PC keys map 1:1; Brain-specific keys that have no PC equivalent
+(dictionary keys: Home/Esc, History, My辞書, Ichiran, Kokugo, 音声,
+英和, marker, jump...) are reached through key combinations
+(see `brain-kbd.c` for the exact table).
+
+## References
+
+* eMMC dump: samusun343-ai/wince-imgs, release tag `emmc`
+* brain-hackers/linux-brain device trees (`imx28-brain.dtsi`,
+  `imx28-pwsh6.dts` ...)
+* brain-hackers/u-boot-brain (register headers under
+  `arch/arm/include/asm/arch-mxs/`)
+* Freescale elftosb (SB image format, `common/EncoreBootImage.*`,
+  `common/IVTDataSource.*`)
+* u-boot `tools/mxsboot.c` (boot config block layout, 0x53 partition)
