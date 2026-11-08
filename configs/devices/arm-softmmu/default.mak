@@ -41,3 +41,6 @@
 # CONFIG_FSL_IMX7=n
 # CONFIG_FSL_IMX6UL=n
 # CONFIG_ALLWINNER_H3=n
+
+# SHARP Brain electronic dictionaries (i.MX28, Windows CE)
+CONFIG_SHARP_BRAIN=y

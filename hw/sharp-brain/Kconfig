@@ -1,0 +1,5 @@
+config SHARP_BRAIN
+    bool
+    # SHARP Brain electronic dictionaries (i.MX28, Windows CE)
+    select PL011 # DUART debug console
+    select SD    # SSP SD/MMC host + eMMC card model
