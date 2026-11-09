@@ -26,13 +26,16 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "hw/core/irq.h"
 #include "brain.h"
 
 typedef struct MxsMiscState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
+    qemu_irq irq;                /* unused output line (stmp blocks) */
     uint32_t regs[0x2000 / 16];
     uint8_t kind;               /* which block */
+    uint8_t ctrl_idx;           /* register slot holding SFTRST/CLKGATE */
 } MxsMiscState;
 
 /*
@@ -50,6 +53,10 @@ static inline MxsMiscState *MISC_OF(void *obj)
 #define KIND_POWER    2
 #define KIND_OCOTP    3
 #define KIND_EMI      4
+#define KIND_USBPHY   5
+#define KIND_PWM      6
+#define KIND_STMP     7
+#define KIND_PXP      8
 
 /* DIGCTL register indexes (offset / 16) */
 #define DIGCTL_MICROSECONDS  0x0c
@@ -69,6 +76,13 @@ static inline MxsMiscState *MISC_OF(void *obj)
 /* EMI register indexes */
 #define EMI_DEBUG            0x0e
 #define EMI_DEBUG_DLL_LOCK   (1u << 20)
+
+/* PXP register slots (offset / 16) and bits (common_regspxp.h) */
+#define PXP_STAT_SLOT        0x01        /* HW_PXP_STAT  @ 0x10 */
+#define PXP_NEXT_SLOT        0x10        /* HW_PXP_NEXT  @ 0x100 */
+#define PXP_STAT_IRQ         (1u << 0)
+#define PXP_STAT_NEXT_IRQ    (1u << 3)
+#define PXP_NEXT_ENABLED     (1u << 0)
 
 /* POWER_STS bits (i.MX28) */
 #define POWER_STS_PWRUP_SOURCE_5V    (0x20u << 24)
@@ -177,11 +191,30 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
      * stmp soft-reset coupling (all blocks with a CTRL register):
      * on the SFTRST rising edge the block's clock gates, so guest
      * reset sequences ("set SFTRST, poll CLKGATE") terminate.  The
-     * guest clears CLKGATE itself after releasing SFTRST.
+     * guest clears CLKGATE itself after releasing SFTRST.  The USB
+     * PHY block carries its CTRL register at offset 0x30.
      */
-    if (idx == 0) {
-        if (!(old & (1u << 31)) && (s->regs[0] & (1u << 31))) {
-            s->regs[0] |= 1u << 30;
+    if (idx == s->ctrl_idx) {
+        if (!(old & (1u << 31)) && (s->regs[s->ctrl_idx] & (1u << 31))) {
+            s->regs[s->ctrl_idx] |= 1u << 30;
+        }
+    }
+
+    /*
+     * PXP: writing a register-set pointer to NEXT starts a process;
+     * model it as completing instantly (STAT.IRQ | NEXT_IRQ set, IRQ
+     * line raised until the guest's ISR clears the status bits).  The
+     * driver writes the raw physical address; ENABLED is a hardware
+     * "buffer pending" indication, not part of the write.
+     */
+    if (s->kind == KIND_PXP) {
+        if (idx == PXP_NEXT_SLOT && value != 0) {
+            s->regs[PXP_STAT_SLOT] |= PXP_STAT_IRQ | PXP_STAT_NEXT_IRQ;
+            qemu_set_irq(s->irq, true);
+        }
+        if (idx == PXP_STAT_SLOT) {
+            qemu_set_irq(s->irq, !!(s->regs[PXP_STAT_SLOT] &
+                                    (PXP_STAT_IRQ | PXP_STAT_NEXT_IRQ)));
         }
     }
 }
@@ -239,6 +272,10 @@ static void mxs_misc_reset(DeviceState *dev)
             s->regs[clkctrl_reset[i].idx] = clkctrl_reset[i].val;
         }
     }
+    if (s->kind == KIND_PWM) {
+        /* PWM0..7_PRESENT bits so PwmInitialize's channel scan passes */
+        s->regs[0] = 0x3fc00000;
+    }
 }
 
 static void mxs_misc_init(Object *obj)
@@ -254,6 +291,16 @@ static void mxs_misc_init(Object *obj)
         s->kind = KIND_POWER;
     } else if (strcmp(t, TYPE_MXS_OCOTP) == 0) {
         s->kind = KIND_OCOTP;
+    } else if (strcmp(t, TYPE_MXS_USBPHY) == 0) {
+        /* USBPHY: PWD@0x0, TX@0x10, RX@0x20, CTRL@0x30 */
+        s->kind = KIND_USBPHY;
+        s->ctrl_idx = 3;
+    } else if (strcmp(t, TYPE_MXS_PWM) == 0) {
+        s->kind = KIND_PWM;
+    } else if (strcmp(t, TYPE_MXS_STMP) == 0) {
+        s->kind = KIND_STMP;
+    } else if (strcmp(t, TYPE_MXS_PXP) == 0) {
+        s->kind = KIND_PXP;
     } else {
         s->kind = KIND_EMI;
     }
@@ -261,6 +308,7 @@ static void mxs_misc_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &mxs_misc_ops, s,
                           "mxs-misc", 0x2000);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
 static void mxs_misc_class_init(ObjectClass *klass, const void *data)
@@ -274,7 +322,8 @@ static void mxs_misc_register_types(void)
 {
     const char *names[] = {
         TYPE_MXS_DIGCTL, TYPE_MXS_CLKCTRL, TYPE_MXS_POWER, TYPE_MXS_OCOTP,
-        TYPE_MXS_EMI,
+        TYPE_MXS_EMI, TYPE_MXS_USBPHY, TYPE_MXS_PWM, TYPE_MXS_STMP,
+        TYPE_MXS_PXP,
     };
 
     for (unsigned i = 0; i < ARRAY_SIZE(names); i++) {

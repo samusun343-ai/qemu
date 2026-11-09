@@ -53,30 +53,41 @@ static const struct {
     { "imx28-bch",      0x8000a000, 0x2000 },
     { "imx28-gpmi",     0x8000c000, 0x4000 },
     { "imx28-etm",      0x80022000, 0x2000 },
-    { "imx28-dcp",      0x80028000, 0x2000 },
-    { "imx28-pxp",      0x8002a000, 0x2000 },
     { "imx28-axi-ahb0", 0x8002e000, 0x2000 },
     { "imx28-can0",     0x80032000, 0x2000 },
     { "imx28-can1",     0x80034000, 0x2000 },
     { "imx28-simdbg",   0x8003c004, 0x3ffc }, /* bootrom mailbox at +0 */
-    { "imx28-saif0",    0x80042000, 0x2000 },
-    { "imx28-saif1",    0x80046000, 0x2000 },
-    { "imx28-audioout", 0x80048000, 0x2000 },
-    { "imx28-audioin",  0x8004c000, 0x4000 },
-    { "imx28-spdif",    0x80054000, 0x2000 },
-    { "imx28-pwm",      0x80064000, 0x2000 },
-    { "imx28-auart0",   0x8006a000, 0x2000 },
-    { "imx28-auart1",   0x8006c000, 0x2000 },
-    { "imx28-auart2",   0x8006e000, 0x2000 },
-    { "imx28-auart3",   0x80070000, 0x2000 },
-    { "imx28-auart4",   0x80072000, 0x2000 },
-    { "imx28-usbphy0",  0x8007c000, 0x2000 },
-    { "imx28-usbphy1",  0x8007e000, 0x2000 },
     { "imx28-usb0",     0x80080000, 0x10000 },
     { "imx28-usb1",     0x80090000, 0x10000 },
     { "imx28-dflpt",    0x800c0000, 0x2000 },
     { "imx28-enet0",    0x800f0000, 0x4000 },
     { "imx28-enet1",    0x800f4000, 0x4000 },
+};
+
+/*
+ * Additional stmp peripheral blocks modelled as plain register files
+ * with the SFTRST/CLKGATE reset handshake (misc.c, TYPE_MXS_STMP).
+ * Drivers probe these during cspddk/device init; without the handshake
+ * their "set SFTRST, poll CLKGATE" loops never terminate.
+ */
+static const struct {
+    const char *type;
+    const char *name;
+    hwaddr base;
+    int irq;                    /* ICOLL line, -1 = none */
+} imx28_stmp_blocks[IMX28_NUM_STMP_BLOCKS] = {
+    { TYPE_MXS_STMP, "auart0",   0x8006a000, 112 },
+    { TYPE_MXS_STMP, "auart1",   0x8006c000, 113 },
+    { TYPE_MXS_STMP, "auart2",   0x8006e000, 114 },
+    { TYPE_MXS_STMP, "auart3",   0x80070000, 115 },
+    { TYPE_MXS_STMP, "auart4",   0x80072000, 116 },
+    { TYPE_MXS_STMP, "saif0",    0x80042000, 59 },
+    { TYPE_MXS_STMP, "saif1",    0x80046000, 58 },
+    { TYPE_MXS_STMP, "spdif",    0x80054000, 45 },
+    { TYPE_MXS_STMP, "audioout", 0x80048000, -1 },
+    { TYPE_MXS_STMP, "audioin",  0x8004c000, -1 },
+    { TYPE_MXS_STMP, "dcp",      0x80028000, 53 },
+    { TYPE_MXS_PXP,  "pxp",      0x8002a000, 39 },
 };
 
 static void imx28_realize(DeviceState *dev, Error **errp)
@@ -148,8 +159,8 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* SSP0 (eMMC) and SSP1 (microSD) */
-    for (int i = 0; i < 2; i++) {
+    /* SSP0 (eMMC), SSP1 (microSD), SSP2 (SPI sub-LCD), SSP3 */
+    for (int i = 0; i < 4; i++) {
         if (!sysbus_realize(SYS_BUS_DEVICE(s->ssp[i]), errp)) {
             return;
         }
@@ -180,6 +191,33 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->pinctrl), 0, IMX28_PINCTRL_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->timrot), 0, IMX28_TIMROT_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lcdif), 0, IMX28_LCDIF_BASE);
+
+    /* PWM (backlight) and the USB PHYs: register files with the
+     * SFTRST/CLKGATE handshake; the USB driver resets the PHYs
+     * during cspddk init and polls CTRL.C LKGATE (at 0x30) */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->pwm), errp) ||
+        !sysbus_realize(SYS_BUS_DEVICE(s->usbphy[0]), errp) ||
+        !sysbus_realize(SYS_BUS_DEVICE(s->usbphy[1]), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->pwm), 0, 0x80064000);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[0]), 0, 0x8007c000);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[1]), 0, 0x8007e000);
+
+    /* remaining stmp blocks (AUART/SAIF/SPDIF/AUDIO/DCP/PXP) */
+    for (int i = 0; i < IMX28_NUM_STMP_BLOCKS; i++) {
+        if (!sysbus_realize(SYS_BUS_DEVICE(s->stmp[i]), errp)) {
+            return;
+        }
+        sysbus_mmio_map(SYS_BUS_DEVICE(s->stmp[i]), 0,
+                        imx28_stmp_blocks[i].base);
+        if (imx28_stmp_blocks[i].irq >= 0) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(s->stmp[i]), 0,
+                               qdev_get_gpio_in_named(DEVICE(s->icoll),
+                                                      "irqs",
+                                                      imx28_stmp_blocks[i].irq));
+        }
+    }
 
     /* I2C0 / I2C1 */
     for (int i = 0; i < 2; i++) {
@@ -258,8 +296,8 @@ static void imx28_realize(DeviceState *dev, Error **errp)
 
         dma->ssp[0] = MXS_SSP(s->ssp[0]);
         dma->ssp[1] = MXS_SSP(s->ssp[1]);
-        dma->ssp[2] = NULL;
-        dma->ssp[3] = NULL;
+        dma->ssp[2] = MXS_SSP(s->ssp[2]);
+        dma->ssp[3] = MXS_SSP(s->ssp[3]);
         dma->lcdif = MXS_LCDIF(s->lcdif);
     }
     {
@@ -287,7 +325,7 @@ static void imx28_init(Object *obj)
     qdev_prop_set_bit(s->apbx_dma, "apbx", true);
     object_property_add_child(obj, "apbx-dma", OBJECT(s->apbx_dma));
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 4; i++) {
         s->ssp[i] = qdev_new(TYPE_MXS_SSP);
         object_property_add_child(obj, g_strdup_printf("ssp%d", i),
                                   OBJECT(s->ssp[i]));
@@ -311,6 +349,21 @@ static void imx28_init(Object *obj)
     object_property_add_child(obj, "emi", OBJECT(s->emi));
     s->rtc = qdev_new(TYPE_MXS_RTC);
     object_property_add_child(obj, "rtc", OBJECT(s->rtc));
+
+    s->pwm = qdev_new(TYPE_MXS_PWM);
+    object_property_add_child(obj, "pwm", OBJECT(s->pwm));
+    for (int i = 0; i < 2; i++) {
+        s->usbphy[i] = qdev_new(TYPE_MXS_USBPHY);
+        object_property_add_child(obj, g_strdup_printf("usbphy%d", i),
+                                  OBJECT(s->usbphy[i]));
+    }
+    for (int i = 0; i < IMX28_NUM_STMP_BLOCKS; i++) {
+        s->stmp[i] = qdev_new(imx28_stmp_blocks[i].type);
+        object_property_add_child(obj,
+                                  g_strdup_printf("%s", imx28_stmp_blocks[i].name),
+                                  OBJECT(s->stmp[i]));
+    }
+
     s->lcdif = qdev_new(TYPE_MXS_LCDIF);
     object_property_add_child(obj, "lcdif", OBJECT(s->lcdif));
 

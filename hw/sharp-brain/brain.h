@@ -73,6 +73,11 @@
 #define IMX28_IRQ_SSP1         97
 #define IMX28_NUM_IRQS         128
 
+/* blocks modelled as plain stmp register files with the SFTRST/CLKGATE
+ * handshake (misc.c TYPE_MXS_STMP): AUART0-4, SAIF0/1, SPDIF,
+ * AUDIOOUT/IN, DCP, PXP */
+#define IMX28_NUM_STMP_BLOCKS 12
+
 /* ------------------------------------------------------------------ */
 /* device types                                                       */
 
@@ -90,7 +95,8 @@ struct Imx28State {
     DeviceState *apbh_dma;
     DeviceState *apbx_dma;
 
-    DeviceState *ssp[2];        /* SSP0 = eMMC, SSP1 = microSD */
+    DeviceState *ssp[4];        /* SSP0 = eMMC, SSP1 = microSD,
+                                 * SSP2 = SPI sub-LCD / sub-MCU, SSP3 */
 
     DeviceState *digctl;
     DeviceState *clkctrl;
@@ -101,6 +107,9 @@ struct Imx28State {
     DeviceState *ocotp;
     DeviceState *emi;          /* DDR controller stub */
     DeviceState *rtc;          /* stmp3xxx RTC block */
+    DeviceState *pwm;          /* PWM block w/ channel-present bits */
+    DeviceState *usbphy[2];    /* USB PHY0/1 */
+    DeviceState *stmp[IMX28_NUM_STMP_BLOCKS]; /* AUART/SAIF/SPDIF/... */
     DeviceState *lcdif;
     DeviceState *i2c[2];        /* I2C0: sub-MCU bus, I2C1 */
     DeviceState *duart;         /* PL011 */
@@ -229,6 +238,10 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_EMI "mxs-emi"
 #define TYPE_MXS_I2C "mxs-i2c"
 #define TYPE_MXS_RTC "mxs-rtc"
+#define TYPE_MXS_USBPHY "mxs-usbphy"
+#define TYPE_MXS_PWM "mxs-pwm"
+#define TYPE_MXS_STMP "mxs-stmp"
+#define TYPE_MXS_PXP "mxs-pxp"
 
 /* ------------------------------------------------------------------ */
 /* I2C (hw/sharp-brain/i2c.c)                                         */
