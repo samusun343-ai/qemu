@@ -346,7 +346,7 @@ typedef struct BrainKbdLayout {
 const BrainKbdLayout *brain_kbd_find_layout(const char *name);
 
 struct BrainKbdState {
-    DeviceState parent_obj;
+    SysBusDevice parent_obj;
 
     DeviceState *pinctrl;       /* link to the i.MX28 PINCTRL */
     char *layout_name;          /* board layout property */

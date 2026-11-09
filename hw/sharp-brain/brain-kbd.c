@@ -378,7 +378,7 @@ static void brain_kbd_class_init(ObjectClass *klass, const void *data)
 
 static const TypeInfo brain_kbd_info = {
     .name = TYPE_BRAIN_KBD,
-    .parent = TYPE_DEVICE,
+    .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(BrainKbdState),
     .class_init = brain_kbd_class_init,
 };
