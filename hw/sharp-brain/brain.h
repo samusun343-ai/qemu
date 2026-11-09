@@ -115,6 +115,20 @@ struct Imx28State {
     DeviceState *duart;         /* PL011 */
 
     MemoryRegion iram;
+    uint8_t *iram_buf;          /* backing store for the IRAM regions */
+    /*
+     * MMIO "mirror" of the IRAM at PA 0xa8000000 (the WinCE uncached
+     * alias of IRAM interpreted as a physical address).  The DVFS
+     * clock-change trampolines run at the uncached VA and toggle the
+     * MMU; real hardware keeps executing the next (already
+     * prefetched) instruction from the pipeline, while QEMU re-fetches
+     * it under the new MMU state - i.e. at PA 0xa8003xxx.  The mirror
+     * makes those fetches succeed, and its read handler redirects the
+     * trampoline's return-jump target from the PA-identity address to
+     * the uncached VA, where instruction fetches work with the MMU
+     * both on (IRAM 1MB section) and off (this mirror).
+     */
+    MemoryRegion iram_mirror;
     BlockBackend *emmc_blk;     /* eMMC backend, used by the boot ROM */
     char *cpu_type;
 };

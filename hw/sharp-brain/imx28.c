@@ -90,6 +90,66 @@ static const struct {
     { TYPE_MXS_PXP,  "pxp",      0x8002a000, 39 },
 };
 
+/*
+ * The IRAM is modelled as an MMIO region over a plain buffer (and
+ * mirrored at PA 0xa8000000, see brain.h) so that the WinCE DVFS
+ * trampoline copied into IRAM+0x3000 can be patched as it is
+ * written.
+ *
+ * The trampoline computes its post-MMU-off continuation as
+ * "(pc & 0x00ffffff) + 0x34" - the PA-identity address - and real
+ * hardware executes the branch that jumps there straight from the
+ * pipeline after the MMU-off MCR.  QEMU re-fetches that branch under
+ * the new MMU state, and the continuation at PA 0x3xxx hits the
+ * reverse problem when the trampoline re-enables the MMU (VA
+ * 0x0-0xfffff is a fault section in the kernel page tables).
+ * Redirect the jump target to the uncached VA (0xa8003044) instead:
+ * that address is fetchable both with the MMU on (the IRAM 1MB
+ * section of the OEMAddressTable) and with the MMU off (the mirror
+ * at PA 0xa8000000), so every fetch around the MMU toggles
+ * succeeds.  The pattern is verified against the exact trampoline
+ * word before patching, on write and on read.
+ */
+#define IRAM_TRAMPOLINE_AND_OFF   0x3010  /* "and r2, r2, r0" (IRAM+0x3000) */
+#define IRAM_TRAMPOLINE_AND_WORD  0xe0022000u
+#define IRAM_TRAMPOLINE_MOV_WORD  0xe1a02000u   /* "mov r2, r0"  */
+
+static uint64_t iram_io_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Imx28State *s = opaque;
+    uint64_t val = 0;
+
+    for (unsigned i = 0; i < size && addr + i < IMX28_IRAM_SIZE; i++) {
+        val |= (uint64_t)s->iram_buf[addr + i] << (8 * i);
+    }
+
+    if (addr == IRAM_TRAMPOLINE_AND_OFF && size == 4 &&
+        (uint32_t)val == IRAM_TRAMPOLINE_AND_WORD) {
+        val = IRAM_TRAMPOLINE_MOV_WORD;
+    }
+    return val;
+}
+
+static void iram_io_write(void *opaque, hwaddr addr, uint64_t val,
+                          unsigned size)
+{
+    Imx28State *s = opaque;
+
+    if (addr == IRAM_TRAMPOLINE_AND_OFF && size == 4 &&
+        (uint32_t)val == IRAM_TRAMPOLINE_AND_WORD) {
+        val = IRAM_TRAMPOLINE_MOV_WORD;
+    }
+    for (unsigned i = 0; i < size && addr + i < IMX28_IRAM_SIZE; i++) {
+        s->iram_buf[addr + i] = (val >> (8 * i)) & 0xff;
+    }
+}
+
+static const MemoryRegionOps iram_io_ops = {
+    .read = iram_io_read,
+    .write = iram_io_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
 static void imx28_realize(DeviceState *dev, Error **errp)
 {
     Imx28State *s = IMX28(dev);
@@ -99,11 +159,20 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    /* IRAM */
-    memory_region_init_ram(&s->iram, OBJECT(dev), "imx28.iram",
-                           IMX28_IRAM_SIZE, errp);
+    /* IRAM (MMIO-backed so the DVFS trampoline can be patched) */
+    s->iram_buf = g_malloc0(IMX28_IRAM_SIZE);
+    memory_region_init_io(&s->iram, OBJECT(dev), &iram_io_ops, s,
+                          "imx28.iram", IMX28_IRAM_SIZE);
     memory_region_add_subregion(get_system_memory(), IMX28_IRAM_BASE,
                                 &s->iram);
+    /*
+     * IRAM mirror at 0xa8000000: makes the WinCE DVFS trampolines'
+     * MMU toggle work under QEMU, see the comment above and brain.h.
+     */
+    memory_region_init_io(&s->iram_mirror, OBJECT(dev), &iram_io_ops, s,
+                          "imx28.iram-mirror", IMX28_IRAM_SIZE);
+    memory_region_add_subregion(get_system_memory(), 0xa8000000,
+                                &s->iram_mirror);
 
     /* ICOLL */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->icoll), errp)) {
