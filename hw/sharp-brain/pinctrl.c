@@ -54,6 +54,11 @@ typedef struct MxsPinctrlState {
     uint32_t irqlev[PINCTRL_BANKS];
     uint32_t irqpol[PINCTRL_BANKS];
     uint32_t irqstat[PINCTRL_BANKS];
+    uint32_t prev_din[PINCTRL_BANKS];   /* for edge detection */
+
+    /* GPIO output observer (matrix keyboard) */
+    MxsGpioOutNotify *out_hook;
+    void *out_opaque;
 } MxsPinctrlState;
 
 static uint32_t pinctrl_din(MxsPinctrlState *s, int b)
@@ -68,6 +73,15 @@ static void pinctrl_update_irq(MxsPinctrlState *s, int b)
     uint32_t armed = s->pin2irq[b] & s->irqen[b];
     uint32_t fire = 0;
 
+    /*
+     * i.MX28 GPIO IRQ semantics (linux gpio-mxs.c):
+     *   IRQLEV=0 (edge): IRQPOL=0 -> falling edge, IRQPOL=1 -> rising edge
+     *   IRQLEV=1 (level): IRQPOL=0 -> low level, IRQPOL=1 -> high level
+     */
+    uint32_t changed = din ^ s->prev_din[b];
+    uint32_t rising = changed & din;
+    uint32_t falling = changed & ~din;
+
     for (int bit = 0; bit < 32; bit++) {
         uint32_t m = 1u << bit;
         if (!(armed & m)) {
@@ -81,14 +95,26 @@ static void pinctrl_update_irq(MxsPinctrlState *s, int b)
                 fire |= m;
             }
         } else {
-            /* edge: keep sticky IRQSTAT until cleared by guest */
+            if (pol && (rising & m)) {
+                s->irqstat[b] |= m;      /* rising edge */
+            } else if (!pol && (falling & m)) {
+                s->irqstat[b] |= m;      /* falling edge */
+            }
         }
     }
+    s->prev_din[b] = din;
     s->irqstat[b] |= fire & armed;
     if (s->irqstat[b] & armed) {
         qemu_set_irq(s->irq[b], 1);
     } else {
         qemu_set_irq(s->irq[b], 0);
+    }
+}
+
+static void pinctrl_notify_output(MxsPinctrlState *s, int b)
+{
+    if (s->out_hook) {
+        s->out_hook(s->out_opaque, b, s->dout[b] & s->doe[b]);
     }
 }
 
@@ -103,6 +129,30 @@ void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,
     }
     s->ext_input[bank] = (s->ext_input[bank] & ~mask) | (value & mask);
     pinctrl_update_irq(s, bank);
+}
+
+/* public: register a GPIO output observer (matrix keyboard) */
+void mxs_pinctrl_set_output_hook(DeviceState *dev, MxsGpioOutNotify fn,
+                                  void *opaque)
+{
+    MxsPinctrlState *s = MXS_PINCTRL(dev);
+
+    s->out_hook = fn;
+    s->out_opaque = opaque;
+    for (int b = 0; b < PINCTRL_BANKS; b++) {
+        pinctrl_notify_output(s, b);
+    }
+}
+
+/* public: read the effective GPIO output state of a bank */
+uint32_t mxs_pinctrl_get_output(DeviceState *dev, int bank)
+{
+    MxsPinctrlState *s = MXS_PINCTRL(dev);
+
+    if (bank < 0 || bank >= PINCTRL_BANKS) {
+        return 0;
+    }
+    return s->dout[bank] & s->doe[bank];
 }
 
 static uint64_t pinctrl_read(void *opaque, hwaddr addr, unsigned size)
@@ -216,7 +266,11 @@ static void pinctrl_write(void *opaque, hwaddr addr, uint64_t value,
                 *target ^= value;
                 break;
             }
-            if (irq_relevant) {
+            if (reg == REG_DOUT(b) || reg == REG_DOE(b)) {
+                /* DIN follows the pin output; the keyboard watches it */
+                pinctrl_update_irq(s, b);
+                pinctrl_notify_output(s, b);
+            } else if (irq_relevant) {
                 pinctrl_update_irq(s, b);
             }
             return;
@@ -248,6 +302,7 @@ static void pinctrl_reset(DeviceState *dev)
     memset(s->irqlev, 0, sizeof(s->irqlev));
     memset(s->irqpol, 0, sizeof(s->irqpol));
     memset(s->irqstat, 0, sizeof(s->irqstat));
+    memset(s->prev_din, 0, sizeof(s->prev_din));
 }
 
 static void pinctrl_init(Object *obj)

@@ -251,6 +251,70 @@ struct MxsLradcState {
 void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,
                            uint32_t value);
 
+/*
+ * Public: observe GPIO output changes.
+ *
+ * The matrix keyboard reads the column drive state from the pinctrl
+ * DOUT/DOE registers, so it needs to be notified whenever the guest
+ * re-drives the column pins.  The callback receives the new
+ * "effective output" value (DOUT & DOE) of the bank that changed.
+ */
+typedef void MxsGpioOutNotify(void *opaque, int bank, uint32_t out);
+
+void mxs_pinctrl_set_output_hook(DeviceState *dev, MxsGpioOutNotify fn,
+                                  void *opaque);
+uint32_t mxs_pinctrl_get_output(DeviceState *dev, int bank);
+
+/* ------------------------------------------------------------------ */
+/* GPIO matrix keyboard (hw/sharp-brain/brain-kbd.c)                  */
+
+#define BRAIN_KBD_ROWS 8
+#define BRAIN_KBD_COLS 7
+
+#define TYPE_BRAIN_KBD "brain-kbd"
+OBJECT_DECLARE_SIMPLE_TYPE(BrainKbdState, BRAIN_KBD)
+
+/*
+ * Host key -> matrix contact mapping.  Tables are indexed by linux
+ * keycode (KEY_CNT entries); the QEMU input core delivers host key
+ * events as linux keycodes.
+ *
+ * flags:
+ *   BRAIN_KEY_DIRECT - key closes the (row, col) contact
+ *   BRAIN_KEY_SYMBOL - key additionally holds the "symbols" (記号)
+ *                      modifier contact while down, reproducing the
+ *                      blue-legend layer of the real keyboard
+ */
+#define BRAIN_KEY_DIRECT 0
+#define BRAIN_KEY_SYMBOL 1
+
+typedef struct BrainKeyDef {
+    int8_t row;                 /* -1 = unmapped */
+    int8_t col;
+    uint8_t flags;
+} BrainKeyDef;
+
+typedef struct BrainKbdLayout {
+    const char *name;
+    int symbol_row, symbol_col; /* "symbols" modifier contact        */
+    const BrainKeyDef *direct;  /* [Q_KEY_CODE__MAX] host keys        */
+    const BrainKeyDef *combo;   /* [Q_KEY_CODE__MAX] Ctrl+key combos  */
+} BrainKbdLayout;
+
+const BrainKbdLayout *brain_kbd_find_layout(const char *name);
+
+struct BrainKbdState {
+    SysBusDevice parent_obj;
+
+    DeviceState *pinctrl;       /* link to the i.MX28 PINCTRL */
+    char *layout_name;          /* board layout property */
+    const BrainKbdLayout *layout;
+
+    uint32_t col_out[5];        /* GPIO bank effective outputs (DOUT&DOE) */
+    uint64_t pressed;           /* bitmask: bit = row * BRAIN_KBD_COLS + col */
+    unsigned int ctrl_held;     /* host Ctrl keys currently down */
+};
+
 /* boot ROM emulation (hw/sharp-brain/bootrom.c) */
 void brain_bootrom_setup(Imx28State *s, BlockBackend *blk);
 

@@ -26,10 +26,12 @@
 #include "qemu/error-report.h"
 #include "system/qtest.h"
 #include "qemu/cutils.h"
+#include "ui/console.h"
 #include "brain.h"
 
 typedef struct BrainMachineState {
     Imx28State soc;
+    DeviceState *kbd;
 } BrainMachineState;
 
 static void brain_init(MachineState *machine)
@@ -74,6 +76,14 @@ static void brain_init(MachineState *machine)
         qdev_prop_set_drive_err(carddev, "drive", blk, &error_fatal);
         qdev_realize_and_unref(carddev, bus, &error_fatal);
     }
+
+    /* GPIO matrix keyboard (PW-SH6 layout; per-lineage board data) */
+    s->kbd = qdev_new(TYPE_BRAIN_KBD);
+    qdev_prop_set_string(s->kbd, "layout", "pw-sh6");
+    object_property_set_link(OBJECT(s->kbd), "pinctrl",
+                             OBJECT(s->soc.pinctrl), &error_fatal);
+    object_property_add_child(OBJECT(machine), "keyboard", OBJECT(s->kbd));
+    qdev_realize_and_unref(s->kbd, NULL, &error_fatal);
 
     /* virtual boot ROM (i.MX28 ROM emulation, driven by the eMMC) */
     if (!qtest_enabled()) {
