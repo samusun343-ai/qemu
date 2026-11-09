@@ -25,7 +25,37 @@
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
+#include "target/arm/cpregs.h"
 #include "brain.h"
+
+/*
+ * WinCE suspend-path cp15 fixup.
+ *
+ * The i.MX28 WinCE kernel's OEMSaveCpuContext (run by the
+ * EnterSuspendThread from VMC_PowerDown) blindly saves a block of
+ * cp15 registers around the DRAM-self-refresh suspend:
+ *
+ *   c1 (SCTLR), c2 (TTBR), c3 (DACR), c5 0/1 (DFSR/IFSR),
+ *   c6 (DFAR), c9 1 0, c9 1 1, c10 0 (TLB lockdown), c15 1 0,
+ *   c13 (FCSE PID)
+ *
+ * QEMU's arm926 model implements all of these except the two
+ * c9/CRm=1 encodings, which fall through to "unknown coprocessor
+ * register" and raise an undefined-instruction exception, crashing
+ * the suspend thread inside nk.exe.  On real hardware these reads
+ * never fault (the ARM926EJ-S executes them in its implementation
+ * defined test/lockdown space; the BSP just saves whatever value
+ * comes back and restores it on resume).
+ *
+ * Register the c9/CRm=1 space as read-as-zero / write-ignored so
+ * the save/restore round trip works, the same way QEMU's
+ * dummy_c15_cp_reginfo covers the crn=15 space.
+ */
+static const ARMCPRegInfo wince_suspend_cp_reginfo[] = {
+    { .name = "C9_C1_LOCKDOWN", .cp = 15, .crn = 9, .crm = 1,
+      .opc1 = 0, .opc2 = CP_ANY, .access = PL1_RW,
+      .type = ARM_CP_CONST | ARM_CP_NO_RAW, .resetvalue = 0 },
+};
 
 static void imx28_icoll_connect(Imx28State *s, DeviceState *dev, int irq)
 {
@@ -158,6 +188,9 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     if (!qdev_realize(DEVICE(&s->cpu), NULL, errp)) {
         return;
     }
+
+    /* WinCE suspend-path cp15 fixup (see above) */
+    define_arm_cp_regs(&s->cpu, wince_suspend_cp_reginfo);
 
     /* IRAM (MMIO-backed so the DVFS trampoline can be patched) */
     s->iram_buf = g_malloc0(IMX28_IRAM_SIZE);
