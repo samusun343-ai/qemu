@@ -46,11 +46,16 @@
 #define IMX28_EMI_BASE         0x800e0000
 #define IMX28_OCOTP_BASE       0x8002c000
 
-/* IRQ numbers (i.MX28 ICOLL) */
-#define IMX28_IRQ_GPIO2        4
-#define IMX28_IRQ_GPIO3        5
-#define IMX28_IRQ_GPIO4        6
+/* IRQ numbers (i.MX28 ICOLL, from linux-brain imx28.dtsi) */
+#define IMX28_IRQ_GPIO0        127
+#define IMX28_IRQ_GPIO1        126
+#define IMX28_IRQ_GPIO2        125
+#define IMX28_IRQ_GPIO3        124
+#define IMX28_IRQ_GPIO4        123
 #define IMX28_IRQ_LRADC_TOUCH  10
+#define IMX28_IRQ_LRADC_THRESH0 14
+#define IMX28_IRQ_LRADC_THRESH1 15
+#define IMX28_IRQ_LRADC_CH(n)  (16 + (n))
 #define IMX28_IRQ_LCDIF        38
 #define IMX28_IRQ_DUART        47
 #define IMX28_IRQ_TIMROT0      48
@@ -64,8 +69,6 @@
 #define IMX28_IRQ_APBH_GPMI    88
 #define IMX28_IRQ_APBH_HSADC   87
 #define IMX28_IRQ_APBH_LCDIF   86
-#define IMX28_IRQ_GPIO0        126
-#define IMX28_IRQ_GPIO1        127
 #define IMX28_IRQ_SSP0         96
 #define IMX28_IRQ_SSP1         97
 #define IMX28_NUM_IRQS         128
@@ -93,8 +96,9 @@ struct Imx28State {
     DeviceState *timrot;
     DeviceState *pinctrl;
     DeviceState *power;
-    DeviceState *lradc;
+    DeviceState *lradc;        /* real LRADC + touch (lradc.c) */
     DeviceState *ocotp;
+    DeviceState *emi;          /* DDR controller stub */
     DeviceState *lcdif;
     DeviceState *duart;         /* PL011 */
 
@@ -188,8 +192,40 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_TIMROT "mxs-timrot"
 #define TYPE_MXS_PINCTRL "mxs-pinctrl"
 #define TYPE_MXS_POWER "mxs-power"
-#define TYPE_MXS_LRADC "mxs-lradc"
 #define TYPE_MXS_OCOTP "mxs-ocotp"
+#define TYPE_MXS_EMI "mxs-emi"
+
+/* ------------------------------------------------------------------ */
+/* LRADC (hw/sharp-brain/lradc.c): ADC + 4-wire resistive touch        */
+
+#define MXS_LRADC_NUM_CH 8
+
+#define TYPE_MXS_LRADC "mxs-lradc"
+OBJECT_DECLARE_SIMPLE_TYPE(MxsLradcState, MXS_LRADC)
+
+/*
+ * IRQ lines in device-tree order: touchscreen, thresh0, thresh1,
+ * channel0..7, button0, button1.
+ */
+#define MXS_LRADC_NUM_IRQ 13
+
+struct MxsLradcState {
+    SysBusDevice parent_obj;
+    MemoryRegion iomem;
+    qemu_irq irqs[MXS_LRADC_NUM_IRQ];
+
+    uint32_t ctrl0, ctrl1, ctrl2, ctrl3, ctrl4;
+    uint32_t status;
+    uint32_t ch[MXS_LRADC_NUM_CH];
+    uint32_t delay[4];
+    uint32_t conversion;
+    uint32_t threshold[2];
+
+    /* touchscreen state */
+    bool touch_down;
+    int x, y;                    /* 0..max */
+    uint32_t x_max, y_max;
+};
 
 /* public: inject external GPIO input levels (keyboard, card detect) */
 void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,

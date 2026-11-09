@@ -20,6 +20,30 @@
  *     CALL (HAB) interprets the IVT at the given address and jumps
  *     to the entry point
  *
+ * The SB image layout was verified against the actual PW-AJ2 eMMC
+ * dump (release "sharp-brain-pw-aj2-emmc") and matches u-boot's
+ * tools/mxsimage.c generator:
+ *
+ *   header (cleartext, header_blocks*16 bytes):
+ *     +0x00 SHA-1 digest (first 16 bytes double as the CBC IV)
+ *     +0x14 'STMP' cookie
+ *     +0x18 major/minor version (bytes), flags (u16)
+ *     +0x1c image size in 16-byte blocks
+ *     +0x20 first boot TAG block (in blocks)
+ *     +0x24 first bootable section id
+ *     +0x28 key count / key dictionary block (u16 each)
+ *     +0x2c header size in blocks
+ *     +0x2e section count / section header size (u16 each)
+ *     +0x34 'sgtl' cookie (SB v1.1)
+ *   section table at header end: 16 bytes per section
+ *     { number, offset, length, flags } (offset/length in blocks)
+ *   key dictionary at key_dict_block*16:
+ *     { CBC-MAC[16], DEK encrypted with the zero KEK (IV=digest[0:16]) }
+ *   first boot TAG block (16 bytes): encrypted with DEK, IV=digest[0:16]
+ *   section command stream: encrypted with DEK, IV=digest[0:16], one
+ *     continuous CBC chain; LOAD payload data is part of the chain and
+ *     follows the 16-byte command, padded to a 16-byte multiple
+ *
  * When the called stage returns, control comes back to a tiny
  * trampoline in IRAM that pokes a mailbox MMIO register; the mailbox
  * requests a guest reset with a saved "phase" so interpretation
@@ -54,6 +78,7 @@
 #define SB_CMD_CALL   0x05
 #define SB_CMD_MODE   0x06
 #define SB_FLAG_HAB   (1 << 0)              /* ROM_HAB_EXEC */
+#define SB_FLAG_LAST_TAG (1 << 0)           /* ROM_TAG_CMD_FLAG_ROM_LAST_TAG */
 
 #define SB_MAX_IMAGE  (4 * MiB)
 
@@ -75,23 +100,9 @@ static BrainBootRom bootrom;
 
 static bool bootrom_pread(uint64_t off, uint32_t len, void *buf)
 {
-    return blk_pread(bootrom.blk, off, len, buf, 0) == len;
+    /* blk_pread() returns 0 on success, negative errno on failure */
+    return blk_pread(bootrom.blk, off, len, buf, 0) >= 0;
 }
-
-/* ------------------------------------------------------------------ */
-/* SB image parsing                                                   */
-
-typedef struct SBHeader {
-    uint8_t digest[20];
-    uint32_t cookie;
-    uint16_t major, minor, flags;
-    uint32_t image_blocks;
-    uint32_t first_boot_tag_block;
-    uint32_t first_bootable_section;
-    uint16_t key_count, key_dict_block, header_blocks;
-    uint16_t section_count, section_header_size;
-    uint32_t sig2;
-} QEMU_PACKED SBHeader;
 
 static bool sb_cbc_decrypt(const uint8_t *key, const uint8_t *iv,
                            const uint8_t *in, uint8_t *out, size_t len)
@@ -106,12 +117,58 @@ static bool sb_cbc_decrypt(const uint8_t *key, const uint8_t *iv,
         error_reportf_err(err, "bootrom: cipher: ");
         return false;
     }
+    if (qcrypto_cipher_setiv(cipher, iv, 16, &err) != 0) {
+        error_reportf_err(err, "bootrom: setiv: ");
+        return false;
+    }
     if (qcrypto_cipher_decrypt(cipher, in, out, len, &err) != 0) {
         error_reportf_err(err, "bootrom: decrypt: ");
         return false;
     }
     return true;
 }
+
+/* ------------------------------------------------------------------ */
+/* SB image parsing                                                   */
+
+/*
+ * SB v1.x image header (96 bytes for v1.1), matching u-boot's
+ * struct sb_boot_image_header (tools/mxsimage.h).
+ */
+typedef struct QEMU_PACKED SBHeader {
+    uint8_t  digest[20];             /* 0x00: SHA-1, [0:16] doubles as CBC IV */
+    uint8_t  signature[4];           /* 0x14: 'STMP' */
+    uint8_t  major_version;          /* 0x18 */
+    uint8_t  minor_version;          /* 0x19 */
+    uint16_t flags;                  /* 0x1a */
+    uint32_t image_blocks;           /* 0x1c: total size in 16-byte blocks */
+    uint32_t first_boot_tag_block;   /* 0x20 */
+    uint32_t first_boot_section_id;  /* 0x24 */
+    uint16_t key_count;              /* 0x28 */
+    uint16_t key_dict_block;         /* 0x2a */
+    uint16_t header_blocks;          /* 0x2c */
+    uint16_t section_count;          /* 0x2e */
+    uint16_t section_header_size;    /* 0x30: section header size in blocks */
+    uint8_t  pad0[2];                /* 0x32 */
+    uint8_t  signature2[4];          /* 0x34: 'sgtl' (v1.1) */
+    uint64_t timestamp_us;           /* 0x38 */
+    uint8_t  product_version[12];    /* 0x40 */
+    uint8_t  component_version[12];  /* 0x4c */
+    uint16_t drive_tag;              /* 0x58 */
+    uint8_t  pad1[6];                /* 0x5a */
+} SBHeader;
+
+QEMU_BUILD_BUG_ON(sizeof(SBHeader) != 96);
+
+/* one 16-byte section table entry */
+typedef struct QEMU_PACKED SBSectionHeader {
+    uint32_t number;                 /* section number */
+    uint32_t offset;                 /* first command block, in blocks */
+    uint32_t length;                 /* section length in blocks */
+    uint32_t flags;                  /* bit 0: bootable */
+} SBSectionHeader;
+
+QEMU_BUILD_BUG_ON(sizeof(SBSectionHeader) != 16);
 
 /*
  * Locate and load the SB image from the boot media.
@@ -179,55 +236,74 @@ static uint8_t *bootrom_load_sb(uint32_t *out_size)
     return img;
 }
 
+/* verify the per-command checksum: (b[0] - sum(b[1:16])) & 0xff == 0x5a */
+static bool sb_cmd_checksum_ok(const uint8_t *c)
+{
+    uint8_t sum = 0;
+
+    for (int i = 1; i < 16; i++) {
+        sum += c[i];
+    }
+    return (uint8_t)(c[0] - sum) == 0x5a;
+}
+
 /*
- * Parse the SB image into the decrypted command stream.
- * Layout notes (elftosb EncoreBootImage):
- *   - [20B digest][STMP header fields ...] padded to header_blocks*16
- *   - section table follows the header
- *   - DEK dictionary at key_dict_block*16: { mac[16], dek[16] } entries,
- *     dek CBC-encrypted with the zero KEK, IV = digest[0:16]
- *   - each section: [encrypted boot TAG command (1 block)]
- *     [encrypted section data] - both CBC streams with IV = digest[0:16]
+ * Parse the SB image into the decrypted command stream:
+ *   cmd = [16B boot TAG command] || [decrypted section stream]
  */
 static bool bootrom_parse_sb(void)
 {
     uint32_t img_size;
     uint8_t *img = bootrom_load_sb(&img_size);
     SBHeader hdr;
-    uint32_t hdr_end, st_off;
+    uint32_t sect_off, tag_off;
+    SBSectionHeader boot_sect;
     uint8_t dek[16];
     uint8_t iv[16];
     uint8_t *stream = NULL;
     uint32_t stream_size = 0;
+    bool found = false;
 
     if (!img) {
         return false;
     }
 
-    memcpy(&hdr, img, sizeof(hdr));
-    if (le32_to_cpu(hdr.cookie) != 0x50444d53 /* 'STMP' LE */) {
-        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: bad SB cookie\n");
+    if (img_size < sizeof(hdr)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: SB image too small\n");
         goto fail;
     }
-    if (hdr.major != 1 || hdr.minor < 1) {
+    memcpy(&hdr, img, sizeof(hdr));
+    if (memcmp(hdr.signature, "STMP", 4) != 0) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: bad SB cookie %c%c%c%c\n",
+                      hdr.signature[0], hdr.signature[1],
+                      hdr.signature[2], hdr.signature[3]);
+        goto fail;
+    }
+    if (hdr.major_version != 1 || hdr.minor_version < 1) {
         qemu_log_mask(LOG_GUEST_ERROR, "bootrom: unsupported SB %d.%d\n",
-                      hdr.major, hdr.minor);
+                      hdr.major_version, hdr.minor_version);
         goto fail;
     }
 
     memcpy(iv, hdr.digest, 16);
-    hdr_end = hdr.header_blocks * 16;
-    if (hdr_end == 0 || hdr_end > img_size) {
-        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: bad header size\n");
+
+    uint32_t hdr_end = hdr.header_blocks * 16;
+    if (hdr_end < sizeof(hdr) || hdr_end > img_size ||
+        hdr.image_blocks * 16 > img_size) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: bad header geometry "
+                      "(header=%u blocks, image=%u blocks, media=%u)\n",
+                      hdr.header_blocks, hdr.image_blocks, img_size / 16);
         goto fail;
     }
 
     if (hdr.key_count) {
         uint32_t kd = hdr.key_dict_block * 16;
         if (kd + 32 > img_size) {
+            qemu_log_mask(LOG_GUEST_ERROR, "bootrom: key dictionary out of "
+                          "range\n");
             goto fail;
         }
-        /* unwrap the DEK with the all-zero KEK */
+        /* unwrap the DEK with the all-zero KEK, IV = digest[0:16] */
         if (!sb_cbc_decrypt((uint8_t[16]) { 0 }, iv, &img[kd + 16], dek,
                             16)) {
             goto fail;
@@ -237,53 +313,80 @@ static bool bootrom_parse_sb(void)
         memset(dek, 0, 16);
     }
 
-    /* section table */
-    st_off = hdr_end;
-    uint32_t boot_tag = hdr.first_boot_tag_block * 16;
-    if (boot_tag + 16 > img_size) {
+    /* locate the bootable section in the section table */
+    sect_off = hdr_end;
+    tag_off = hdr.first_boot_tag_block * 16;
+    if (tag_off + 16 > img_size) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: boot tag out of range\n");
         goto fail;
     }
 
-    /* build the command stream: [boot TAG block][boot section data] */
     for (uint32_t i = 0; i < hdr.section_count; i++) {
-        uint32_t tag, off, len, flags;
+        SBSectionHeader sh;
 
-        if (st_off + (i + 1) * 16 > img_size) {
+        if (sect_off + (i + 1) * sizeof(sh) > img_size) {
             goto fail;
         }
-        tag = le32_to_cpu(*(uint32_t *)&img[st_off + i * 16]);
-        off = le32_to_cpu(*(uint32_t *)&img[st_off + i * 16 + 4]);
-        len = le32_to_cpu(*(uint32_t *)&img[st_off + i * 16 + 8]);
-        flags = le32_to_cpu(*(uint32_t *)&img[st_off + i * 16 + 12]);
-
-        if (tag != hdr.first_bootable_section) {
-            continue;
+        memcpy(&sh, &img[sect_off + i * sizeof(sh)], sizeof(sh));
+        if (le32_to_cpu(sh.number) == hdr.first_boot_section_id) {
+            boot_sect = sh;
+            found = true;
+            break;
         }
-        if (off * 16 + len * 16 > img_size) {
-            goto fail;
-        }
-
-        /* boot tag command block + section data, decrypted separately */
-        stream_size = 16 + len * 16;
-        stream = g_malloc(stream_size);
-        if (flags & 2) {          /* ROM_SECTION_CLEARTEXT */
-            memcpy(stream, &img[boot_tag], 16);
-            memcpy(&stream[16], &img[off * 16], len * 16);
-        } else {
-            if (!sb_cbc_decrypt(dek, iv, &img[boot_tag], stream, 16)) {
-                goto fail;
-            }
-            if (!sb_cbc_decrypt(dek, iv, &img[off * 16], &stream[16],
-                                len * 16)) {
-                goto fail;
-            }
-        }
-        break;
+    }
+    if (!found) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "bootrom: bootable section %u not found\n",
+                      hdr.first_boot_section_id);
+        goto fail;
     }
 
-    if (!stream) {
+    uint32_t data_off = le32_to_cpu(boot_sect.offset) * 16;
+    uint32_t data_len = le32_to_cpu(boot_sect.length) * 16;
+    if (data_off + data_len > img_size) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bootrom: section out of range "
+                      "(off=%u len=%u image=%u)\n",
+                      data_off, data_len, img_size);
+        goto fail;
+    }
+
+    /*
+     * Build the command stream:
+     *   [boot TAG block] || [section data]
+     * The TAG block and the section data are decrypted independently,
+     * each starting from IV = digest[0:16]; within the section the CBC
+     * chain runs continuously across commands and LOAD payloads.
+     */
+    stream_size = 16 + data_len;
+    stream = g_malloc(stream_size);
+
+    qemu_log_mask(LOG_TRACE,
+                  "bootrom: SB image %u blocks, header %u blocks, "
+                  "%u sections, boot section %u (off=%u len=%u), "
+                  "boot tag at +%u%s\n",
+                  hdr.image_blocks, hdr.header_blocks, hdr.section_count,
+                  hdr.first_boot_section_id, data_off, data_len, tag_off,
+                  hdr.key_count ? ", encrypted" : ", cleartext");
+
+    if (hdr.key_count == 0) {
+        /* unencrypted image */
+        memcpy(stream, &img[tag_off], 16);
+        memcpy(&stream[16], &img[data_off], data_len);
+    } else {
+        if (!sb_cbc_decrypt(dek, iv, &img[tag_off], stream, 16)) {
+            goto fail;
+        }
+        if (!sb_cbc_decrypt(dek, iv, &img[data_off], &stream[16],
+                            data_len)) {
+            goto fail;
+        }
+    }
+
+    if (!sb_cmd_checksum_ok(stream)) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "bootrom: bootable section not found\n");
+                      "bootrom: boot TAG command checksum bad "
+                      "(%02x %02x %02x %02x...)\n",
+                      stream[0], stream[1], stream[2], stream[3]);
         goto fail;
     }
 
@@ -330,13 +433,13 @@ static bool bootrom_do_call(uint32_t ivt_addr)
     };
 
     if (address_space_read(&address_space_memory, ivt_addr,
-                           MEMTXATTRS_UNSPECIFIED, ivt, 32) != 32) {
+                           MEMTXATTRS_UNSPECIFIED, ivt, 32) != MEMTX_OK) {
         return false;
     }
-    if ((ivt[0] & 0xff) != 0xd1) {
+    if ((le32_to_cpu(ivt[0]) & 0xff) != 0xd1) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "bootrom: IVT at 0x%08x has bad tag 0x%08x\n",
-                      ivt_addr, ivt[0]);
+                      ivt_addr, le32_to_cpu(ivt[0]));
         return false;
     }
     entry = le32_to_cpu(ivt[1]);
@@ -347,10 +450,6 @@ static bool bootrom_do_call(uint32_t ivt_addr)
                         sizeof(trampoline));
 
     cpu_reset(cs);
-    CPU_FOREACH(cs) {
-        /* single CPU machine; nothing else to prepare */
-    }
-    cs = CPU(cpu);
     cpu->env.uncached_cpsr = ARM_CPU_MODE_SVC | CPSR_I | CPSR_F;
     cpu->env.regs[0] = 0;
     cpu->env.regs[13] = BOOTROM_SP;
@@ -372,31 +471,45 @@ static bool bootrom_run(void)
     while (pos + 16 <= bootrom.cmd_size) {
         uint8_t *c = &bootrom.cmd[pos];
         uint8_t cmd = c[1];
-        uint16_t flags = le16_to_cpu(*(uint16_t *)&c[2]);
+        uint16_t flags = lduw_le_p(&c[2]);
         uint32_t addr = le32_to_cpu(*(uint32_t *)&c[4]);
         uint32_t count = le32_to_cpu(*(uint32_t *)&c[8]);
         uint32_t data = le32_to_cpu(*(uint32_t *)&c[12]);
         uint32_t next = pos + 16;
 
+        if (!sb_cmd_checksum_ok(c)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "bootrom: bad command checksum at +%u "
+                          "(tag 0x%02x)\n", pos, cmd);
+            return false;
+        }
+
         switch (cmd) {
         case SB_CMD_NOP:
         case SB_CMD_TAG:
+        case SB_CMD_MODE:
+            qemu_log_mask(LOG_TRACE, "bootrom: +%06u NOP/TAG/MODE "
+                          "(tag 0x%02x flags 0x%04x)\n", pos, cmd, flags);
             break;
         case SB_CMD_LOAD:
             if (addr + count > IMX28_IRAM_SIZE &&
                 (addr < IMX28_DRAM_BASE ||
                  addr + count > IMX28_DRAM_BASE + IMX28_DRAM_SIZE)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "bootrom: LOAD to invalid address 0x%08x\n",
-                              addr);
+                              "bootrom: LOAD to invalid address 0x%08x "
+                              "(%u bytes)\n", addr, count);
                 return false;
             }
+            qemu_log_mask(LOG_TRACE, "bootrom: +%06u LOAD 0x%08x, %u bytes\n",
+                          pos, addr, count);
             address_space_write(&address_space_memory, addr,
                                 MEMTXATTRS_UNSPECIFIED, &c[16], count);
             next = (pos + 16 + count + 15) & ~15u;
             break;
         case SB_CMD_FILL:
         {
+            qemu_log_mask(LOG_TRACE, "bootrom: +%06u FILL 0x%08x, %u bytes "
+                          "with 0x%08x\n", pos, addr, count, data);
             uint32_t words = (count + 3) / 4;
             for (uint32_t i = 0; i < words; i++) {
                 address_space_write(&address_space_memory,
@@ -408,15 +521,11 @@ static bool bootrom_run(void)
         case SB_CMD_JUMP:
         case SB_CMD_CALL:
             bootrom.cmd_pos = next;    /* resume after the call */
-            if (flags & SB_FLAG_HAB) {
-                if (!bootrom_do_call(addr)) {
-                    return false;
-                }
-            } else {
-                /* plain JUMP/CALL: use the address directly */
-                if (!bootrom_do_call(addr)) {
-                    return false;
-                }
+            qemu_log_mask(LOG_TRACE, "bootrom: +%06u %s 0x%08x%s\n", pos,
+                          cmd == SB_CMD_CALL ? "CALL" : "JUMP", addr,
+                          (flags & SB_FLAG_HAB) ? " (HAB)" : "");
+            if (!bootrom_do_call(addr)) {
+                return false;
             }
             return true;
         default:

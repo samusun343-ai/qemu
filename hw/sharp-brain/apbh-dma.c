@@ -90,7 +90,7 @@ static bool mxs_dma_read_desc(dma_addr_t addr,
 
     if (address_space_read(&address_space_memory, addr,
                            MEMTXATTRS_UNSPECIFIED, &hdr,
-                           sizeof(hdr)) != sizeof(hdr)) {
+                           sizeof(hdr)) != MEMTX_OK) {
         return false;
     }
     *next = le32_to_cpu(hdr.next);
@@ -105,7 +105,7 @@ static bool mxs_dma_read_desc(dma_addr_t addr,
     if (n) {
         if (address_space_read(&address_space_memory, addr + 12,
                                MEMTXATTRS_UNSPECIFIED, pio,
-                               n * 4) != n * 4) {
+                               n * 4) != MEMTX_OK) {
             return false;
         }
         for (unsigned i = 0; i < n; i++) {
@@ -265,6 +265,14 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
             s->ctrl0 &= ~value;
         } else {
             s->ctrl0 ^= value;
+        }
+        /*
+         * While SFTRST is asserted the block is held in reset and its
+         * clock is gated: CLKGATE reads back set (boot loaders poll
+         * for exactly this before releasing the block).
+         */
+        if (s->ctrl0 & (1u << 31)) {
+            s->ctrl0 |= 1u << 30;
         }
         return;
     case DMA_REG_CTRL1:

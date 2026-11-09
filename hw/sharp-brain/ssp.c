@@ -101,6 +101,8 @@ static void mxs_ssp_irq_update(MxsSspState *s)
 /* ------------------------------------------------------------------ */
 /* command execution                                                  */
 
+static void mxs_ssp_fill_fifo(MxsSspState *s);
+
 static void mxs_ssp_execute(MxsSspState *s)
 {
     SDRequest req;
@@ -146,8 +148,12 @@ static void mxs_ssp_execute(MxsSspState *s)
         s->sdresp[3] = ldl_be_p(&resp[12]);
     }
 
-    /* command done */
-    s->status &= ~(STATUS_CMD_BUSY | STATUS_BUSY);
+    /* command done: reset sticky error/status bits */
+    s->status &= ~(STATUS_CMD_BUSY | STATUS_BUSY |
+                   STATUS_RESP_TIMEOUT | STATUS_TIMEOUT |
+                   STATUS_RESP_CRC_ERR | STATUS_RESP_ERR |
+                   STATUS_DATA_CRC_ERR | STATUS_FIFO_OVRFLW |
+                   STATUS_FIFO_UNDRFLW);
 
     /* prepare data phase */
     if (s->ctrl0 & CTRL0_DATA_XFER) {
@@ -155,6 +161,11 @@ static void mxs_ssp_execute(MxsSspState *s)
         s->data_remaining = s->xfer_size;
         s->fifo_level = 0;
         s->status |= STATUS_DATA_BUSY;
+        if (s->data_dir_read) {
+            /* pull the first FIFO words from the card immediately so
+             * STATUS.FIFO_EMPTY clears for the polling data path */
+            mxs_ssp_fill_fifo(s);
+        }
     }
 
     /* raise the "transfer complete" event so a DMA engine waiting on
@@ -172,7 +183,12 @@ static void mxs_ssp_fill_fifo(MxsSspState *s)
            s->fifo_level < SSP_FIFO_WORDS) {
         uint8_t buf[4];
         sdbus_read_data(&s->sdbus, buf, 4);
-        s->fifo[s->fifo_level++] = ldl_be_p(buf);
+        /*
+         * The SSP packs the first wire byte into bits [7:0] of the
+         * FIFO word (u-boot mxsmmc reads the data register directly
+         * as native-endian 32-bit words).
+         */
+        s->fifo[s->fifo_level++] = ldl_le_p(buf);
         s->data_remaining -= 4;
     }
     if (s->data_remaining == 0) {
@@ -351,13 +367,13 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
             if (value & CTRL0_RUN) {
                 mxs_ssp_execute(s);
             }
-            return;
+            break;
         case 4:
             s->ctrl0 |= value & ~CTRL0_RUN;
             if (value & CTRL0_RUN) {
                 mxs_ssp_execute(s);
             }
-            return;
+            break;
         case 8:
             s->ctrl0 &= ~value;
             return;
@@ -365,18 +381,58 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
             s->ctrl0 ^= value;
             return;
         }
+        /* SFTRST asserted -> clock gated (read back set) */
+        if (s->ctrl0 & CTRL0_SFTRST) {
+            s->ctrl0 |= CTRL0_CLKGATE;
+        }
         return;
     case SSP_CMD0:
-        s->cmd0 = value;
+        switch (off) {
+        case 0:  s->cmd0 = value; break;
+        case 4:  s->cmd0 |= value; break;
+        case 8:  s->cmd0 &= ~value; break;
+        case 12: s->cmd0 ^= value; break;
+        }
         return;
     case SSP_CMD1:
-        s->cmd1 = value;
+        switch (off) {
+        case 0:  s->cmd1 = value; break;
+        case 4:  s->cmd1 |= value; break;
+        case 8:  s->cmd1 &= ~value; break;
+        case 12: s->cmd1 ^= value; break;
+        }
         return;
     case SSP_XFER_SIZE:
-        s->xfer_size = value;
+        switch (off) {
+        case 0:  s->xfer_size = value; break;
+        case 4:  s->xfer_size |= value; break;
+        case 8:  s->xfer_size &= ~value; break;
+        case 12: s->xfer_size ^= value; break;
+        }
         return;
     case SSP_BLOCK_SIZE:
-        s->block_size = value;
+        switch (off) {
+        case 0:  s->block_size = value; break;
+        case 4:  s->block_size |= value; break;
+        case 8:  s->block_size &= ~value; break;
+        case 12: s->block_size ^= value; break;
+        }
+        return;
+    case SSP_COMPREF:
+        switch (off) {
+        case 0:  s->compref = value; break;
+        case 4:  s->compref |= value; break;
+        case 8:  s->compref &= ~value; break;
+        case 12: s->compref ^= value; break;
+        }
+        return;
+    case SSP_COMPMASK:
+        switch (off) {
+        case 0:  s->compmask = value; break;
+        case 4:  s->compmask |= value; break;
+        case 8:  s->compmask &= ~value; break;
+        case 12: s->compmask ^= value; break;
+        }
         return;
     case SSP_TIMING:
         s->timing = value;
@@ -402,7 +458,7 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
     {
         if (!s->data_dir_read && s->data_remaining >= 4) {
             uint8_t buf[4];
-            stl_be_p(buf, value);
+            stl_le_p(buf, value);
             sdbus_write_data(&s->sdbus, buf, 4);
             s->data_remaining -= 4;
             if (s->data_remaining == 0) {
