@@ -83,7 +83,7 @@ static void brain_init(MachineState *machine)
     object_property_set_link(OBJECT(s->kbd), "pinctrl",
                              OBJECT(s->soc.pinctrl), &error_fatal);
     object_property_add_child(OBJECT(machine), "keyboard", OBJECT(s->kbd));
-    qdev_realize_and_unref(s->kbd, NULL, &error_fatal);
+    sysbus_realize(SYS_BUS_DEVICE(s->kbd), &error_fatal);
 
     /* virtual boot ROM (i.MX28 ROM emulation, driven by the eMMC) */
     if (!qtest_enabled()) {
