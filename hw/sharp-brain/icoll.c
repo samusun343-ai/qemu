@@ -55,8 +55,9 @@ struct MxsIcollState {
 
     uint32_t level;
     uint32_t ctrl;
+    uint32_t vector_base;       /* software vector table base (VECTOR reg) */
     uint32_t vector_latch;      /* last IRQ number written to VECTOR */
-    uint32_t vectors[ICOLL_INTR_NREG];   /* handler addresses */
+    uint32_t vectors[ICOLL_INTR_NREG];   /* handler addresses (ROM flow) */
     uint32_t intr[ICOLL_INTR_NREG];      /* enable/prio per IRQ */
     uint32_t pending[ICOLL_INTR_NREG];   /* software-pending state */
     bool asserted[ICOLL_INTR_NREG];      /* level state of input lines */
@@ -89,8 +90,21 @@ static void icoll_set_irq(void *opaque, int n, int level)
     if (n >= ICOLL_INTR_NREG) {
         return;
     }
+    if (!!level != s->asserted[n]) {
+        qemu_log_mask(LOG_TRACE, "icoll: irq %d -> %d\n", n, !!level);
+    }
     s->asserted[n] = !!level;
     icoll_update(s);
+}
+
+static int icoll_current_irq(MxsIcollState *s)
+{
+    for (int i = 0; i < ICOLL_INTR_NREG; i++) {
+        if (s->asserted[i] && (s->intr[i] & ICOLL_INTR_ENABLE)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
@@ -102,12 +116,26 @@ static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
     switch (reg) {
     case ICOLL_VECTOR:
         if (off == 0) {
-            /* return vector address of latched interrupt number */
-            int n = s->vector_latch;
-            if (n < ICOLL_INTR_NREG) {
-                return s->vectors[n];
+            /*
+             * Hardware vectoring: reading VECTOR returns the address
+             * of the vector slot for the highest-priority active
+             * interrupt: vector_base + 4 * irq.  The Windows CE
+             * dispatcher extracts the IRQ number with
+             * (value >> 2) & 0x7f (the base is 0x200-aligned), the
+             * ROM-era flow instead reads the handler address back
+             * after writing the IRQ number (kept working through
+             * vector_latch/vectors[] for compatibility).
+             */
+            int n = icoll_current_irq(s);
+
+            if (n < 0) {
+                n = 0x7f;      /* no interrupt: mirrors STAT */
+            } else {
+                s->vector_latch = n;
             }
-            return 0;
+            uint32_t v = s->vector_base + 4 * (uint32_t)n;
+            qemu_log_mask(LOG_TRACE, "icoll: VECTOR -> 0x%x (n=%d)\n", v, n);
+            return v;
         }
         qemu_log_mask(LOG_GUEST_ERROR,
                       "icoll: unimplemented VECTOR offset 0x%" HWADDR_PRIx "\n",
@@ -122,9 +150,11 @@ static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
         int i;
         for (i = 0; i < ICOLL_INTR_NREG; i++) {
             if (s->asserted[i] && (s->intr[i] & ICOLL_INTR_ENABLE)) {
+                qemu_log_mask(LOG_TRACE, "icoll: STAT -> %d\n", i);
                 return i;
             }
         }
+        qemu_log_mask(LOG_TRACE, "icoll: STAT -> none\n");
         return 0x7f;    /* no interrupt */
     }
     default:
@@ -152,16 +182,44 @@ static void icoll_write(void *opaque, hwaddr addr, uint64_t value,
     uint32_t reg = addr & ~0xf;
     uint32_t off = addr & 0xf;
 
+    if (reg >= 0x120) {
+        int n = (reg - 0x120) / 0x10;
+        if (((reg - 0x120) % 0x10) == 0) {
+            qemu_log_mask(LOG_TRACE, "icoll: INTR[%d] %s 0x%08x\n", n,
+                          off == 0 ? "REG" : off == 4 ? "SET" :
+                          off == 8 ? "CLR" : "TOG", (uint32_t)value);
+        }
+    } else if (reg >= 0x20 && reg < 0x120) {
+        qemu_log_mask(LOG_TRACE, "icoll: alias 0x%03x %s 0x%08x\n",
+                      (unsigned)reg,
+                      off == 0 ? "REG" : off == 4 ? "SET" :
+                      off == 8 ? "CLR" : "TOG", (uint32_t)value);
+    } else if (reg == 0) {
+        qemu_log_mask(LOG_TRACE, "icoll: VECTOR w 0x%08x\n", (uint32_t)value);
+    }
+
     switch (reg) {
     case ICOLL_VECTOR:
         if (off == 0) {
-            /* writing the interrupt number latches it for the next read */
-            s->vector_latch = value & 0x7f;
+            /*
+             * Writing VECTOR: the ROM-era flow writes the IRQ
+             * number to latch it (reading then returns the handler
+             * address through vectors[]); an OS can alternatively
+             * write a vector-table base, which the read path adds
+             * to 4*irq.  Heuristic: small values latch the IRQ
+             * number, page-aligned values program the base.
+             */
+            if (value & ~0x1ffu) {
+                s->vector_base = value & ~0x1ffu;
+            } else {
+                s->vector_latch = value & 0x7f;
+            }
             return;
         }
         break;
     case ICOLL_LEVELACK:
         s->level = value;
+        qemu_log_mask(LOG_TRACE, "icoll: LEVELACK 0x%x\n", (uint32_t)value);
         icoll_update(s);
         return;
     case ICOLL_CTRL:

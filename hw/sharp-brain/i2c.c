@@ -1,5 +1,5 @@
 /*
- * i.MX28 I2C controller emulation (PIO master mode).
+ * i.MX28 I2C controller emulation (PIO master mode + APBX DMA hooks).
  *
  * Copyright (c) 2026 samusun343-ai
  *
@@ -12,6 +12,10 @@
  * NO_SLAVE_ACK, which the boot loader handles gracefully (the RTC /
  * battery sub-MCU of the real machine is not modelled yet).
  *
+ * When the APBX DMA drives the controller, a PIO descriptor programs
+ * CTRL0/CTRL1 (RUN arms but does not start the transfer); the
+ * following data descriptor moves the payload and executes it.
+ *
  * Registers use the stmp 16-byte layout (REG/SET/CLR/TOG).
  */
 
@@ -19,6 +23,7 @@
 #include "qemu/log.h"
 #include "hw/core/irq.h"
 #include "hw/i2c/i2c.h"
+#include "system/dma.h"
 #include "brain.h"
 
 #define HW_I2C_CTRL0       0x000
@@ -54,21 +59,6 @@
 #define BM_STAT_DATA_ENGINE_CMPLT_IRQ_SUMMARY (1u << 6)
 #define BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY      (1u << 5)
 
-OBJECT_DECLARE_SIMPLE_TYPE(MxsI2cState, MXS_I2C)
-
-struct MxsI2cState {
-    SysBusDevice parent_obj;
-    MemoryRegion iomem;
-    qemu_irq irq;
-
-    I2CBus *bus;
-
-    uint32_t ctrl0, ctrl1, stat;
-    uint32_t timing0, timing1, timing2;
-    uint32_t queuectrl, queueend, queuecmd, queuedata;
-    uint32_t data[4];
-};
-
 static void i2c_update_irq(MxsI2cState *s)
 {
     uint32_t en = (s->ctrl1 & BM_CTRL1_IRQ_EN) >> 8;
@@ -83,6 +73,8 @@ static void i2c_run(MxsI2cState *s)
     bool read = s->ctrl0 & BM_CTRL0_DIRECTION;
     uint8_t buf[16];
     int ret = 0;
+
+    s->run_pending = false;
 
     if (!(s->ctrl0 & BM_CTRL0_MASTER_MODE) || count == 0) {
         goto done;
@@ -174,20 +166,22 @@ static uint64_t i2c_read(void *opaque, hwaddr addr, unsigned size)
     return 0;
 }
 
-static void i2c_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+/*
+ * One stmp register write.  off selects the REG/SET/CLR/TOG alias.
+ * from_dma: RUN only arms the transfer (the APBX data descriptor
+ * executes it); otherwise RUN executes immediately.
+ */
+static void i2c_write_one(MxsI2cState *s, uint32_t reg, uint32_t off,
+                          uint64_t val, bool from_dma)
 {
-    MxsI2cState *s = opaque;
-    uint32_t reg = addr & ~0xf;
-    uint32_t off = addr & 0xf;
-
 #define STMP_REG(field)                                         \
     do {                                                        \
         switch (off) {                                          \
         case 0:  s->field = val; break;                         \
         case 4:  s->field |= val; break;                         \
-        case 8:  s->field &= ~val; break;                        \
+        case 8:  s->field &= ~val; break;                         \
         case 12: s->field ^= val; break;                         \
-        }                                                        \
+        } \
     } while (0)
 
     switch (reg) {
@@ -201,7 +195,11 @@ static void i2c_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
             s->ctrl0 |= BM_CTRL0_CLKGATE;
         }
         if ((s->ctrl0 & BM_CTRL0_RUN) && !(old & BM_CTRL0_RUN)) {
-            i2c_run(s);
+            if (from_dma) {
+                s->run_pending = true;
+            } else {
+                i2c_run(s);
+            }
         }
         return;
     }
@@ -243,9 +241,68 @@ static void i2c_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     }
 #undef STMP_REG
 
-    qemu_log_mask(LOG_UNIMP, "mxs-i2c: unimplemented write 0x%" HWADDR_PRIx
-                  " = 0x%" PRIx64 "\n", addr, val);
+    qemu_log_mask(LOG_UNIMP, "mxs-i2c: unimplemented write 0x%08x"
+                  " = 0x%" PRIx64 "\n", reg, val);
 }
+
+static void i2c_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+{
+    MxsI2cState *s = opaque;
+
+    i2c_write_one(s, addr & ~0xfu, addr & 0xfu, val, false);
+}
+
+/* ------------------------------------------------------------------ */
+/* APBX DMA client hooks (channels 6 = I2C0, 7 = I2C1)                 */
+/* ------------------------------------------------------------------ */
+
+void mxs_i2c_dma_pio(MxsI2cState *s, int word_idx, uint32_t value)
+{
+    if (word_idx < 0) {
+        /* end of the PIO word sequence; nothing to kick here */
+        return;
+    }
+    /* DMA PIO words land in consecutive 16-byte-spaced registers */
+    i2c_write_one(s, word_idx * 0x10, 0, value, true);
+}
+
+void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
+                      dma_addr_t bufaddr, uint32_t len)
+{
+    uint8_t buf[16];
+
+    if (len > sizeof(buf)) {
+        len = sizeof(buf);
+    }
+
+    if (to_device) {
+        /* READ descriptor: memory -> controller DATA0-3, then the
+         * armed transfer transmits them */
+        memset(buf, 0, sizeof(buf));
+        address_space_read(&address_space_memory, bufaddr,
+                           MEMTXATTRS_UNSPECIFIED, buf, len);
+        for (uint32_t i = 0; i < len; i++) {
+            s->data[i / 4] |= buf[i] << (24 - 8 * (i % 4));
+        }
+        if (s->run_pending) {
+            i2c_run(s);
+        }
+    } else {
+        /* WRITE descriptor: controller -> memory.  Execute a pending
+         * receive first so DATA0-3 hold the payload. */
+        if (s->run_pending) {
+            i2c_run(s);
+        }
+        memset(buf, 0, sizeof(buf));
+        for (uint32_t i = 0; i < sizeof(buf); i++) {
+            buf[i] = (s->data[i / 4] >> (24 - 8 * (i % 4))) & 0xff;
+        }
+        address_space_write(&address_space_memory, bufaddr,
+                            MEMTXATTRS_UNSPECIFIED, buf, len);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 
 static const MemoryRegionOps i2c_ops = {
     .read = i2c_read,
@@ -265,6 +322,7 @@ static void i2c_reset(DeviceState *dev)
     s->timing0 = s->timing1 = s->timing2 = 0;
     s->queuectrl = s->queueend = s->queuecmd = s->queuedata = 0;
     memset(s->data, 0, sizeof(s->data));
+    s->run_pending = false;
     qemu_set_irq(s->irq, 0);
 }
 

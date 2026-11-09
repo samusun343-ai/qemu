@@ -34,6 +34,11 @@ static void imx28_icoll_connect(Imx28State *s, DeviceState *dev, int irq)
                                               irq));
 }
 
+/* sink for DMA channels that have no interrupt on the real chip */
+static void imx28_unused_irq(void *opaque, int n, int level)
+{
+}
+
 /*
  * Catch-all "unimplemented" blocks: register layout, sizes and gaps
  * follow NXP's i.MX28 memory map (u-boot regs-base.h).
@@ -48,7 +53,6 @@ static const struct {
     { "imx28-bch",      0x8000a000, 0x2000 },
     { "imx28-gpmi",     0x8000c000, 0x4000 },
     { "imx28-etm",      0x80022000, 0x2000 },
-    { "imx28-apbx",     0x80024000, 0x2000 },
     { "imx28-dcp",      0x80028000, 0x2000 },
     { "imx28-pxp",      0x8002a000, 0x2000 },
     { "imx28-axi-ahb0", 0x8002e000, 0x2000 },
@@ -60,7 +64,6 @@ static const struct {
     { "imx28-audioout", 0x80048000, 0x2000 },
     { "imx28-audioin",  0x8004c000, 0x4000 },
     { "imx28-spdif",    0x80054000, 0x2000 },
-    { "imx28-rtc",      0x80056000, 0x2000 },
     { "imx28-pwm",      0x80064000, 0x2000 },
     { "imx28-auart0",   0x8006a000, 0x2000 },
     { "imx28-auart1",   0x8006c000, 0x2000 },
@@ -118,6 +121,33 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                                                   dma_irq_map[i]));
     }
 
+    /*
+     * APBX DMA (0x80024000): same CCW engine, APBX channel map
+     * (linux imx28.dtsi): 0/1 auart4 rx/tx, 2 spdif, 3 none,
+     * 4/5 saif0/1, 6/7 i2c0/1, 8..15 auart0..3 rx/tx.
+     */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->apbx_dma), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->apbx_dma), 0, IMX28_APBX_DMA_BASE);
+    {
+        static const int apbx_irq_map[MXS_DMA_CHANNELS] = {
+            78, 79, 66, -1,
+            80, 81, 68, 69,
+            70, 71, 72, 73,
+            74, 75, 76, 77,
+        };
+        qemu_irq unused = qemu_allocate_irq(imx28_unused_irq, NULL, 0);
+
+        for (int i = 0; i < MXS_DMA_CHANNELS; i++) {
+            qemu_irq line = (apbx_irq_map[i] < 0)
+                ? unused
+                : qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
+                                         apbx_irq_map[i]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(s->apbx_dma), i, line);
+        }
+    }
+
     /* SSP0 (eMMC) and SSP1 (microSD) */
     for (int i = 0; i < 2; i++) {
         if (!sysbus_realize(SYS_BUS_DEVICE(s->ssp[i]), errp)) {
@@ -128,8 +158,9 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         imx28_icoll_connect(s, s->ssp[i], IMX28_IRQ_SSP0 + i);
     }
 
-    /* DIGCTL / CLKCTRL / POWER / OCOTP / PINCTRL / TIMROT / EMI */
-    if (!sysbus_realize(SYS_BUS_DEVICE(s->digctl), errp) ||
+    /* DIGCTL / CLKCTRL / POWER / OCOTP / PINCTRL / TIMROT / EMI / RTC */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->rtc), errp) ||
+        !sysbus_realize(SYS_BUS_DEVICE(s->digctl), errp) ||
         !sysbus_realize(SYS_BUS_DEVICE(s->clkctrl), errp) ||
         !sysbus_realize(SYS_BUS_DEVICE(s->power), errp) ||
         !sysbus_realize(SYS_BUS_DEVICE(s->ocotp), errp) ||
@@ -144,6 +175,8 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->power), 0, IMX28_POWER_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->ocotp), 0, IMX28_OCOTP_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->emi), 0, IMX28_EMI_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->rtc), 0, 0x80056000);
+    imx28_icoll_connect(s, s->rtc, 29);   /* alarm / onemsec IRQ */
     sysbus_mmio_map(SYS_BUS_DEVICE(s->pinctrl), 0, IMX28_PINCTRL_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->timrot), 0, IMX28_TIMROT_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lcdif), 0, IMX28_LCDIF_BASE);
@@ -219,7 +252,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                                     imx28_unimplemented[i].size);
     }
 
-    /* DMA <-> SSP/LCDIF wiring */
+    /* DMA <-> SSP/LCDIF/I2C wiring */
     {
         MxsDmaState *dma = MXS_DMA(s->apbh_dma);
 
@@ -228,6 +261,12 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         dma->ssp[2] = NULL;
         dma->ssp[3] = NULL;
         dma->lcdif = MXS_LCDIF(s->lcdif);
+    }
+    {
+        MxsDmaState *dma = MXS_DMA(s->apbx_dma);
+
+        dma->i2c[0] = MXS_I2C(s->i2c[0]);
+        dma->i2c[1] = MXS_I2C(s->i2c[1]);
     }
 }
 
@@ -243,6 +282,10 @@ static void imx28_init(Object *obj)
 
     s->apbh_dma = qdev_new(TYPE_MXS_DMA);
     object_property_add_child(obj, "apbh-dma", OBJECT(s->apbh_dma));
+
+    s->apbx_dma = qdev_new(TYPE_MXS_DMA);
+    qdev_prop_set_bit(s->apbx_dma, "apbx", true);
+    object_property_add_child(obj, "apbx-dma", OBJECT(s->apbx_dma));
 
     for (int i = 0; i < 2; i++) {
         s->ssp[i] = qdev_new(TYPE_MXS_SSP);
@@ -266,6 +309,8 @@ static void imx28_init(Object *obj)
     object_property_add_child(obj, "ocotp", OBJECT(s->ocotp));
     s->emi = qdev_new(TYPE_MXS_EMI);
     object_property_add_child(obj, "emi", OBJECT(s->emi));
+    s->rtc = qdev_new(TYPE_MXS_RTC);
+    object_property_add_child(obj, "rtc", OBJECT(s->rtc));
     s->lcdif = qdev_new(TYPE_MXS_LCDIF);
     object_property_add_child(obj, "lcdif", OBJECT(s->lcdif));
 

@@ -156,6 +156,8 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
         return;
     }
 
+    uint32_t old = s->regs[idx];
+
     switch (off) {
     case 0:
         s->regs[idx] = value;
@@ -169,6 +171,18 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
     case 12:
         s->regs[idx] ^= value;
         break;
+    }
+
+    /*
+     * stmp soft-reset coupling (all blocks with a CTRL register):
+     * on the SFTRST rising edge the block's clock gates, so guest
+     * reset sequences ("set SFTRST, poll CLKGATE") terminate.  The
+     * guest clears CLKGATE itself after releasing SFTRST.
+     */
+    if (idx == 0) {
+        if (!(old & (1u << 31)) && (s->regs[0] & (1u << 31))) {
+            s->regs[0] |= 1u << 30;
+        }
     }
 }
 

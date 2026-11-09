@@ -172,19 +172,22 @@ static void timrot_arm(MxsTimrotState *s, int n)
             return;     /* comparator IRQ is the only event */
         }
         /*
-         * Ticks until the running count drops to MATCH_COUNT
-         * (wrap-aware: the count is heading down through 32 bits).
+         * Re-anchor the free-running counter to "now" and arm for
+         * the moment the count drops to MATCH_COUNT.  delta is
+         * wrap-aware 32-bit arithmetic; delta == 0 means the count
+         * sits exactly on the match value (e.g. just crossed it),
+         * so the next crossing is a full 32-bit wrap away.
          */
-        uint32_t delta = s->base_count[n] - s->match_count[n];
-        int64_t when = s->base_ns[n] + delta * nspt;
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
-        if (when <= now) {
-            /* match is in the past: next crossing is one wrap away */
-            when = now + (((1ULL << 32) - (uint32_t)(now - when))
-                          / (uint64_t)nspt + 1) * nspt;
+        s->base_count[n] = timrot_count(s, n);
+        s->base_ns[n] = now;
+        uint32_t delta = s->base_count[n] - s->match_count[n];
+
+        if (delta == 0) {
+            delta = 0xffffffffu;
         }
-        timer_mod(s->tick[n], when);
+        timer_mod(s->tick[n], now + (uint64_t)delta * nspt);
     } else {
         /* fixed-count mode: expiry when the count reaches zero */
         if (s->base_count[n] == 0) {

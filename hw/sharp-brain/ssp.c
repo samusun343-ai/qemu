@@ -51,17 +51,40 @@
 #define CTRL0_GET_RESP      (1 << 17)
 #define CTRL0_ENABLE        (1 << 16)
 
-#define CTRL1_SDIO_IRQ          (1 << 31)
-#define CTRL1_RESP_ERR_IRQ      (1 << 30)
-#define CTRL1_RESP_TIMEOUT_IRQ  (1 << 29)
-#define CTRL1_DATA_TIMEOUT_IRQ  (1 << 28)
-#define CTRL1_DATA_CRC_IRQ      (1 << 27)
-#define CTRL1_FIFO_UNDERRUN_IRQ (1 << 26)
-#define CTRL1_RECV_TIMEOUT_IRQ  (1 << 25)
-#define CTRL1_FIFO_OVERRUN_IRQ  (1 << 24)
-#define CTRL1_IRQ_BITS          (0xff000000)
-#define CTRL1_ENABLE_IRQS       (0x00ff0000)
-#define CTRL1_DMA_ENABLE        (1 << 0)
+/*
+ * CTRL1 (i.MX28 layout, u-boot regs-ssp.h): the IRQ and IRQ_ENABLE
+ * bits are interleaved (IRQ at bit 2n+1, enable at bit 2n), NOT two
+ * separate status/enable bytes:
+ *   31 SDIO_IRQ            30 SDIO_IRQ_EN
+ *   29 RESP_ERR_IRQ        28 RESP_ERR_IRQ_EN
+ *   27 RESP_TIMEOUT_IRQ    26 RESP_TIMEOUT_IRQ_EN
+ *   25 DATA_TIMEOUT_IRQ    24 DATA_TIMEOUT_IRQ_EN
+ *   23 DATA_CRC_IRQ        22 DATA_CRC_IRQ_EN
+ *   21 FIFO_UNDERRUN_IRQ   20 FIFO_UNDERRUN_EN
+ *   19 CEATA_CCS_ERR_IRQ   18 CEATA_CCS_ERR_IRQ_EN
+ *   17 RECV_TIMEOUT_IRQ    16 RECV_TIMEOUT_IRQ_EN
+ *   15 FIFO_OVERRUN_IRQ    14 FIFO_OVERRUN_IRQ_EN
+ *   13 DMA_ENABLE
+ */
+#define CTRL1_SDIO_IRQ            (1u << 31)
+#define CTRL1_SDIO_IRQ_EN         (1u << 30)
+#define CTRL1_RESP_ERR_IRQ        (1u << 29)
+#define CTRL1_RESP_ERR_IRQ_EN     (1u << 28)
+#define CTRL1_RESP_TIMEOUT_IRQ    (1u << 27)
+#define CTRL1_RESP_TIMEOUT_IRQ_EN (1u << 26)
+#define CTRL1_DATA_TIMEOUT_IRQ    (1u << 25)
+#define CTRL1_DATA_TIMEOUT_IRQ_EN (1u << 24)
+#define CTRL1_DATA_CRC_IRQ        (1u << 23)
+#define CTRL1_DATA_CRC_IRQ_EN     (1u << 22)
+#define CTRL1_FIFO_UNDERRUN_IRQ   (1u << 21)
+#define CTRL1_FIFO_UNDERRUN_EN    (1u << 20)
+#define CTRL1_CEATA_CCS_ERR_IRQ   (1u << 19)
+#define CTRL1_CEATA_CCS_ERR_IRQ_EN (1u << 18)
+#define CTRL1_RECV_TIMEOUT_IRQ    (1u << 17)
+#define CTRL1_RECV_TIMEOUT_IRQ_EN (1u << 16)
+#define CTRL1_FIFO_OVERRUN_IRQ    (1u << 15)
+#define CTRL1_FIFO_OVERRUN_IRQ_EN (1u << 14)
+#define CTRL1_DMA_ENABLE          (1u << 13)
 
 #define STATUS_PRESENT          (1 << 31)
 #define STATUS_SD_PRESENT       (1 << 29)
@@ -89,7 +112,15 @@
 
 static void mxs_ssp_irq_update(MxsSspState *s)
 {
-    uint32_t fires = s->ctrl1 & (s->ctrl1 >> 8) & 0x00ff0000;
+    uint32_t fires = 0;
+
+    /* interleaved IRQ / IRQ_EN pairs, bits 15..31 */
+    for (uint32_t m = CTRL1_FIFO_OVERRUN_IRQ;
+         m && m <= CTRL1_SDIO_IRQ; m <<= 2) {
+        if ((s->ctrl1 & m) && (s->ctrl1 & (m >> 1))) {
+            fires |= m;
+        }
+    }
 
     if (fires) {
         qemu_set_irq(s->irq, 1);
@@ -126,9 +157,15 @@ static void mxs_ssp_execute(MxsSspState *s)
     rlen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
 
     if (rlen == 0) {
-        /* no response / timeout */
-        s->status |= STATUS_RESP_TIMEOUT;
-        s->ctrl1 |= CTRL1_RESP_TIMEOUT_IRQ;
+        /*
+         * No response: only a timeout when the host actually expects
+         * one (GET_RESP/CHECK_RESP).  Commands like CMD0 finish
+         * cleanly on real hardware and must not raise RESP_TIMEOUT.
+         */
+        if (s->ctrl0 & (CTRL0_GET_RESP | CTRL0_CHECK_RESP)) {
+            s->status |= STATUS_RESP_TIMEOUT;
+            s->ctrl1 |= CTRL1_RESP_TIMEOUT_IRQ;
+        }
         mxs_ssp_irq_update(s);
         return;
     }
@@ -442,6 +479,9 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         s->timing = value;
         return;
     case SSP_CTRL1:
+        qemu_log_mask(LOG_TRACE, "mxs-ssp: CTRL1 %s 0x%08x\n",
+                      off == 0 ? "REG" : off == 4 ? "SET" :
+                      off == 8 ? "CLR" : "TOG", (uint32_t)value);
         switch (off) {
         case 0:
             s->ctrl1 = value;

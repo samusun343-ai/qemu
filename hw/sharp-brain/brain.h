@@ -88,6 +88,7 @@ struct Imx28State {
     DeviceState *icoll;
 
     DeviceState *apbh_dma;
+    DeviceState *apbx_dma;
 
     DeviceState *ssp[2];        /* SSP0 = eMMC, SSP1 = microSD */
 
@@ -99,6 +100,7 @@ struct Imx28State {
     DeviceState *lradc;        /* real LRADC + touch (lradc.c) */
     DeviceState *ocotp;
     DeviceState *emi;          /* DDR controller stub */
+    DeviceState *rtc;          /* stmp3xxx RTC block */
     DeviceState *lcdif;
     DeviceState *i2c[2];        /* I2C0: sub-MCU bus, I2C1 */
     DeviceState *duart;         /* PL011 */
@@ -109,9 +111,18 @@ struct Imx28State {
 };
 
 /* ------------------------------------------------------------------ */
-/* APBH DMA (hw/sharp-brain/apbh-dma.c)                               */
+/* APBH/APBX DMA (hw/sharp-brain/apbh-dma.c)                          */
 
 #define MXS_DMA_CHANNELS 16
+
+/*
+ * APBX channel map (linux imx28.dtsi dma-apbx node):
+ *   0,1   auart4 rx/tx   2 spdif   3 (none)
+ *   4,5   saif0/1         6,7 i2c0/1
+ *   8..15 auart0..3 rx/tx
+ */
+#define MXS_APBX_CH_I2C0 6
+#define MXS_APBX_CH_I2C1 7
 
 #define TYPE_MXS_DMA "mxs-dma"
 OBJECT_DECLARE_SIMPLE_TYPE(MxsDmaState, MXS_DMA)
@@ -128,9 +139,12 @@ struct MxsDmaState {
     uint32_t sema[MXS_DMA_CHANNELS];
     uint32_t bar[MXS_DMA_CHANNELS];
 
+    bool is_apbx;                /* APBX channel map and clients */
+
     /* typed client pointers (same directory, shared header) */
-    struct MxsSspState *ssp[4];         /* channels 0-3 */
-    struct MxsLcdifPriv *lcdif;         /* channel 13 */
+    struct MxsSspState *ssp[4];         /* APBH channels 0-3 */
+    struct MxsLcdifPriv *lcdif;         /* APBH channel 13 */
+    struct MxsI2cState *i2c[2];         /* APBX channels 6-7 */
 };
 
 /* ------------------------------------------------------------------ */
@@ -214,6 +228,34 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_OCOTP "mxs-ocotp"
 #define TYPE_MXS_EMI "mxs-emi"
 #define TYPE_MXS_I2C "mxs-i2c"
+#define TYPE_MXS_RTC "mxs-rtc"
+
+/* ------------------------------------------------------------------ */
+/* I2C (hw/sharp-brain/i2c.c)                                         */
+
+OBJECT_DECLARE_SIMPLE_TYPE(MxsI2cState, MXS_I2C)
+
+struct MxsI2cState {
+    SysBusDevice parent_obj;
+    MemoryRegion iomem;
+    qemu_irq irq;
+
+    I2CBus *bus;
+
+    uint32_t ctrl0, ctrl1, stat;
+    uint32_t timing0, timing1, timing2;
+    uint32_t queuectrl, queueend, queuecmd, queuedata;
+    uint32_t data[4];
+
+    /* a RUN programmed through a DMA PIO descriptor waits for the
+     * data descriptor before the synchronous transfer executes */
+    bool run_pending;
+};
+
+/* DMA client hooks (channels 6/7 of the APBX DMA) */
+void mxs_i2c_dma_pio(MxsI2cState *s, int word_idx, uint32_t value);
+void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
+                      dma_addr_t bufaddr, uint32_t len);
 
 /* ------------------------------------------------------------------ */
 /* LRADC (hw/sharp-brain/lradc.c): ADC + 4-wire resistive touch        */
@@ -304,7 +346,7 @@ typedef struct BrainKbdLayout {
 const BrainKbdLayout *brain_kbd_find_layout(const char *name);
 
 struct BrainKbdState {
-    SysBusDevice parent_obj;
+    DeviceState parent_obj;
 
     DeviceState *pinctrl;       /* link to the i.MX28 PINCTRL */
     char *layout_name;          /* board layout property */

@@ -6,8 +6,9 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
- * The mxs DMA engines walk command descriptor chains ("CCW"s) located
- * in guest memory:
+ * Both mxs DMA engines (APBH at 0x80004000 for the SSP/LCDIF/GPMI
+ * side, APBX at 0x80024000 for the APBX peripherals) walk command
+ * descriptor chains ("CCW"s) located in guest memory:
  *
  *   struct ccw {
  *       u32 next;          // next descriptor address, 0 = stop
@@ -43,6 +44,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "brain.h"
 
 #define DMA_REG_CTRL0         0x000
@@ -128,7 +130,16 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
     while (cur && steps++ < 1024) {
         uint32_t next, bits, xfer, bufaddr;
         uint32_t pio[16] = { 0 };
-        MxsSspState *ssp = (ch < 4) ? s->ssp[ch] : NULL;
+        MxsSspState *ssp = (!s->is_apbx && ch < 4) ? s->ssp[ch] : NULL;
+        MxsI2cState *i2c = NULL;
+
+        if (s->is_apbx) {
+            if (ch == MXS_APBX_CH_I2C0) {
+                i2c = s->i2c[0];
+            } else if (ch == MXS_APBX_CH_I2C1) {
+                i2c = s->i2c[1];
+            }
+        }
 
         if (!mxs_dma_read_desc(cur, &next, &bits, &xfer, &bufaddr,
                                pio, ARRAY_SIZE(pio))) {
@@ -140,13 +151,17 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
 
         switch (CCW_COMMAND(bits)) {
         case 0: /* PIO: write words into the bound peripheral */
-            if (ch < 4 && ssp) {
+            if (ssp) {
                 for (unsigned i = 0; i < pio_num; i++) {
                     mxs_ssp_dma_pio(ssp, i, pio[i]);
                 }
                 /* the peripheral command is implicitly started after
                  * the PIO word sequence (hardware behaviour) */
                 mxs_ssp_dma_pio(ssp, -1, 0);
+            } else if (i2c) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_i2c_dma_pio(i2c, i, pio[i]);
+                }
             } else {
                 qemu_log_mask(LOG_UNIMP,
                               "mxs-dma: PIO descriptor on clientless "
@@ -154,9 +169,11 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
             }
             break;
         case 1: /* WRITE: peripheral -> memory */
-            if (ch < 4 && ssp) {
+            if (ssp) {
                 mxs_ssp_dma_data(ssp, false, bufaddr, xfer);
-            } else if (ch == 13 && s->lcdif) {
+            } else if (i2c) {
+                mxs_i2c_dma_data(i2c, false, bufaddr, xfer);
+            } else if (!s->is_apbx && ch == 13 && s->lcdif) {
                 mxs_lcdif_dma_data(s->lcdif, false, bufaddr, xfer);
             } else {
                 qemu_log_mask(LOG_UNIMP,
@@ -165,9 +182,11 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
             }
             break;
         case 2: /* READ: memory -> peripheral */
-            if (ch < 4 && ssp) {
+            if (ssp) {
                 mxs_ssp_dma_data(ssp, true, bufaddr, xfer);
-            } else if (ch == 13 && s->lcdif) {
+            } else if (i2c) {
+                mxs_i2c_dma_data(i2c, true, bufaddr, xfer);
+            } else if (!s->is_apbx && ch == 13 && s->lcdif) {
                 mxs_lcdif_dma_data(s->lcdif, true, bufaddr, xfer);
             } else {
                 qemu_log_mask(LOG_UNIMP,
@@ -384,8 +403,12 @@ static void mxs_dma_init(Object *obj)
 static void mxs_dma_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    static const Property mxs_dma_properties[] = {
+        DEFINE_PROP_BOOL("apbx", MxsDmaState, is_apbx, false),
+    };
 
     device_class_set_legacy_reset(dc, mxs_dma_reset);
+    device_class_set_props(dc, mxs_dma_properties);
 }
 
 static const TypeInfo mxs_dma_info = {
