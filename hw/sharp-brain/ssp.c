@@ -361,6 +361,9 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
 
     switch (reg) {
     case SSP_CTRL0:
+    {
+        uint32_t old = s->ctrl0;
+
         switch (off) {
         case 0:
             s->ctrl0 = value & ~CTRL0_RUN;
@@ -381,11 +384,12 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
             s->ctrl0 ^= value;
             return;
         }
-        /* SFTRST asserted -> clock gated (read back set) */
-        if (s->ctrl0 & CTRL0_SFTRST) {
+        /* SFTRST rising edge -> clock gates once */
+        if (!(old & CTRL0_SFTRST) && (s->ctrl0 & CTRL0_SFTRST)) {
             s->ctrl0 |= CTRL0_CLKGATE;
         }
         return;
+    }
     case SSP_CMD0:
         switch (off) {
         case 0:  s->cmd0 = value; break;

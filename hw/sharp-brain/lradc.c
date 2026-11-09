@@ -292,14 +292,17 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
 
     switch (offset & ~0xcull) {
     case HW_LRADC_CTRL0:
+    {
+        uint32_t old = s->ctrl0;
+
         switch (offset & 0xc) {
         case 0x0: s->ctrl0 = val; break;
         case 0x4: s->ctrl0 |= val; break;
         case 0x8: s->ctrl0 &= ~val; break;
         case 0xc: s->ctrl0 ^= val; break;
         }
-        /* SFTRST asserted -> clock gated (read back set) */
-        if (s->ctrl0 & (1u << 31)) {
+        /* SFTRST rising edge -> clock gates once */
+        if (!(old & (1u << 31)) && (s->ctrl0 & (1u << 31))) {
             s->ctrl0 |= 1u << 30;
         }
         /* writing SCHEDULE bits triggers an immediate conversion */
@@ -307,6 +310,7 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
             lradc_convert(s, val & BM_CTRL0_SCHEDULE);
         }
         return;
+    }
     case HW_LRADC_CTRL1:
         /* write to CLR offset clears IRQ status bits */
         if ((offset & 0xc) == 0x8) {

@@ -256,6 +256,9 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
     case DMA_REG_CTRL0 + 4:
     case DMA_REG_CTRL0 + 8:
     case DMA_REG_CTRL0 + 12:
+    {
+        uint32_t old = s->ctrl0;
+
         off = addr & 0xf;
         if (off == 0) {
             s->ctrl0 = value;
@@ -267,14 +270,17 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
             s->ctrl0 ^= value;
         }
         /*
-         * While SFTRST is asserted the block is held in reset and its
-         * clock is gated: CLKGATE reads back set (boot loaders poll
-         * for exactly this before releasing the block).
+         * When SFTRST is asserted the block enters reset and its
+         * clock gates; boot loaders poll for CLKGATE reading back
+         * set before releasing the block.  Model this as a one-shot
+         * on the SFTRST rising edge so an explicit CLKGATE clear
+         * (issued while SFTRST is still asserted) sticks.
          */
-        if (s->ctrl0 & (1u << 31)) {
+        if (!(old & (1u << 31)) && (s->ctrl0 & (1u << 31))) {
             s->ctrl0 |= 1u << 30;
         }
         return;
+    }
     case DMA_REG_CTRL1:
     case DMA_REG_CTRL1 + 4:
     case DMA_REG_CTRL1 + 8:

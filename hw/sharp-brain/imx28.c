@@ -61,8 +61,6 @@ static const struct {
     { "imx28-audioin",  0x8004c000, 0x4000 },
     { "imx28-spdif",    0x80054000, 0x2000 },
     { "imx28-rtc",      0x80056000, 0x2000 },
-    { "imx28-i2c0",     0x80058000, 0x2000 },
-    { "imx28-i2c1",     0x8005a000, 0x2000 },
     { "imx28-pwm",      0x80064000, 0x2000 },
     { "imx28-auart0",   0x8006a000, 0x2000 },
     { "imx28-auart1",   0x8006c000, 0x2000 },
@@ -149,6 +147,17 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->pinctrl), 0, IMX28_PINCTRL_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->timrot), 0, IMX28_TIMROT_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lcdif), 0, IMX28_LCDIF_BASE);
+
+    /* I2C0 / I2C1 */
+    for (int i = 0; i < 2; i++) {
+        if (!sysbus_realize(SYS_BUS_DEVICE(s->i2c[i]), errp)) {
+            return;
+        }
+        sysbus_mmio_map(SYS_BUS_DEVICE(s->i2c[i]), 0, 0x80058000 + i * 0x2000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(s->i2c[i]), 0,
+                           qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
+                                                  111 - i));
+    }
 
     /* LRADC (ADC + 4-wire touch) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->lradc), errp)) {
@@ -259,6 +268,12 @@ static void imx28_init(Object *obj)
     object_property_add_child(obj, "emi", OBJECT(s->emi));
     s->lcdif = qdev_new(TYPE_MXS_LCDIF);
     object_property_add_child(obj, "lcdif", OBJECT(s->lcdif));
+
+    for (int i = 0; i < 2; i++) {
+        s->i2c[i] = qdev_new(TYPE_MXS_I2C);
+        object_property_add_child(obj, g_strdup_printf("i2c%d", i),
+                                  OBJECT(s->i2c[i]));
+    }
 
     s->duart = qdev_new(TYPE_PL011);
     object_property_add_child(obj, "duart", OBJECT(s->duart));

@@ -6,6 +6,7 @@ system_ss.add(when: 'CONFIG_SHARP_BRAIN', if_true: files(
   'apbh-dma.c',
   'ssp.c',
   'lradc.c',
+  'i2c.c',
   'lcdif.c',
   'misc.c',
   'timrot.c',

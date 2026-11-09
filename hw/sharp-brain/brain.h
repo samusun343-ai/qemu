@@ -100,6 +100,7 @@ struct Imx28State {
     DeviceState *ocotp;
     DeviceState *emi;          /* DDR controller stub */
     DeviceState *lcdif;
+    DeviceState *i2c[2];        /* I2C0: sub-MCU bus, I2C1 */
     DeviceState *duart;         /* PL011 */
 
     MemoryRegion iram;
@@ -168,16 +169,34 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
 #define TYPE_MXS_LCDIF "mxs-lcdif"
 OBJECT_DECLARE_SIMPLE_TYPE(MxsLcdifPriv, MXS_LCDIF)
 
+/* ILI9805 panel geometry (native portrait orientation) */
+#define ILI9805_NATIVE_WIDTH   480
+#define ILI9805_NATIVE_HEIGHT  854
+
 struct MxsLcdifPriv {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     qemu_irq irq;
     QemuConsole *con;
 
-    uint32_t regs[0x2000 / 16];
+    /* LCDIF registers */
+    uint32_t ctrl, ctrl1, ctrl2;
+    uint32_t transfer_count, cur_buf, next_buf, timing;
+    uint32_t vdctrl[4], dvi[4], csc[4];
+
+    /* CPU-mode transfer countdown */
+    uint32_t cpu_pending;
+
+    /* ILI9805 smart-panel state */
+    uint16_t *gram;
+    bool panel_on, write_active, dirty;
+    uint8_t last_cmd, cmd_pos, mac, pixel_fmt;
+    uint8_t cmd_bytes[8];
+    uint32_t col_start, col_end, page_start, page_end;
+    uint32_t gram_x, gram_y;
+
+    /* console geometry (landscape view) */
     uint32_t width, height;
-    bool invalidate;
-    MemoryRegionSection fbsection;
 };
 
 /* DMA channel 13 client */
@@ -194,6 +213,7 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_POWER "mxs-power"
 #define TYPE_MXS_OCOTP "mxs-ocotp"
 #define TYPE_MXS_EMI "mxs-emi"
+#define TYPE_MXS_I2C "mxs-i2c"
 
 /* ------------------------------------------------------------------ */
 /* LRADC (hw/sharp-brain/lradc.c): ADC + 4-wire resistive touch        */
