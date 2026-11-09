@@ -125,3 +125,16 @@ static void pw_aj2_machine_init(MachineClass *mc)
 }
 
 DEFINE_MACHINE_ARM("pw-aj2", pw_aj2_machine_init)
+
+/*
+ * PW-AJ1: another SH6-platform model, kept as a distinct machine so
+ * per-model board data (keyboard layout, panel) can diverge later.
+ */
+static void pw_aj1_machine_init(MachineClass *mc)
+{
+    brain_machine_init(mc);
+    mc->desc = "SHARP Brain PW-AJ1 (SH6 platform, i.MX28, Windows CE)";
+    mc->alias = NULL;
+}
+
+DEFINE_MACHINE_ARM("pw-aj1", pw_aj1_machine_init)

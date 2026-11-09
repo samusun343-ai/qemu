@@ -16,6 +16,7 @@ data (LCD panel, keyboard matrix, touch wiring).
 | machine      | alias       | lineage      | LCD        | RAM   | notes |
 |--------------|-------------|--------------|------------|-------|-------|
 | `pw-sh6`     | `pw-aj2`, `sharp-brain` | SH6 platform | 854x480 16bpp | 128MB | eMMC + microSD, DUART console |
+| `pw-aj1`     | -           | SH6 platform | 854x480 16bpp | 128MB | same board data as pw-sh6 |
 | (future) `pw-sh1`..`pw-sh5` | -    | 3rd gen      | 800x480    | 128MB | mostly same board data |
 
 ## Booting
