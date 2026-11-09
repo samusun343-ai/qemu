@@ -6,30 +6,41 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
- * Four 32-bit timers counting down from FIXED_COUNT at 24 MHz
- * (SELECT=TICK_ALWAYS) or 32 kHz / 8 kHz / 100 Hz / 1 kHz / 1 Hz
- * variants.  IRQ on reaching zero (IRQ_EN), RELOAD mode restarts.
+ * Four 32-bit timers counting down at 24 MHz (SELECT=TICK_ALWAYS),
+ * 32 kHz / 8 kHz / 100 Hz / 1 kHz / 1 Hz (possibly prescaled).
  *
- * Layout: ROTCTRL 0x00, ROTCOUNT 0x10, then per timer n (0x40 stride):
- *   TIMCTRLn      0x20 + n*0x40
- *   RUNNING_COUNT 0x30 + n*0x40
- *   FIXED_COUNT   0x40 + n*0x40
- *   MATCH_COUNT   0x50 + n*0x40
+ * Two counting modes (HW_TIMROT_TIMCTRLn):
+ *
+ *   - fixed-count mode (MATCH_MODE=0, the default): the counter is
+ *     loaded from FIXED_COUNT (directly or through UPDATE=1) and
+ *     counts down; it holds at zero when it expires.  With RELOAD=1
+ *     it restarts from FIXED_COUNT.  EBOOT uses this for short
+ *     delays.
+ *
+ *   - match mode (MATCH_MODE=1, bit 11): the counter free-runs over
+ *     the whole 32-bit range (wrapping 0 -> 0xffffffff) and the IRQ
+ *     is raised when the running count crosses MATCH_COUNT going
+ *     down.  The Windows CE kernel uses this for the variable system
+ *     tick: it programs MATCH_COUNT = current - ticks and rewrites it
+ *     in the ISR (observed values 0xffffd120 = 1 ms and 0xffedb080 =
+ *     100 ms idle tick at 12 MHz = 24 MHz / 2 prescale).
+ *
+ * Layout: ROTCTRL 0x00, ROTCOUNT 0x10, VERSION 0x120, then per
+ * timer n (0x40 stride): TIMCTRLn 0x20, RUNNING_COUNT 0x30,
+ * FIXED_COUNT 0x40, MATCH_COUNT 0x50.
  */
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
-#include "qemu/timer.h"
-#include "hw/core/ptimer.h"
 #include "hw/core/irq.h"
-#include "hw/core/ptimer.h"
 #include "brain.h"
 
 #define TIMROT_TIMCTRL(n)     (0x20 + (n) * 0x40)
 #define TIMROT_RUNNING(n)     (0x30 + (n) * 0x40)
 #define TIMROT_FIXED(n)       (0x40 + (n) * 0x40)
 #define TIMROT_MATCH(n)       (0x50 + (n) * 0x40)
+#define TIMROT_VERSION        0x120
 
 #define TIMCTRL_IRQ           (1 << 15)
 #define TIMCTRL_IRQ_EN        (1 << 14)
@@ -50,11 +61,6 @@
 
 OBJECT_DECLARE_SIMPLE_TYPE(MxsTimrotState, MXS_TIMROT)
 
-typedef struct TimrotCb {
-    MxsTimrotState *s;
-    int n;
-} TimrotCb;
-
 typedef struct MxsTimrotState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
@@ -65,8 +71,16 @@ typedef struct MxsTimrotState {
     uint32_t fixed_count[4];
     uint32_t match_count[4];
 
-    ptimer_state *timer[4];
-    TimrotCb cb[4];
+    /*
+     * Counter model: at host time base_ns[n] the count was
+     * base_count[n]; it decrements at timrot_freq() while
+     * counting[n].  Match mode wraps at 32 bits, fixed-count mode
+     * clamps at zero (and stops unless RELOAD).
+     */
+    int64_t base_ns[4];
+    uint32_t base_count[4];
+    bool counting[4];
+    QEMUTimer *tick[4];
 } MxsTimrotState;
 
 static uint64_t timrot_freq(uint32_t ctrl)
@@ -85,41 +99,167 @@ static uint64_t timrot_freq(uint32_t ctrl)
     }
 }
 
-static void timrot_timer_expire(void *opaque)
+static int64_t timrot_ns_per_tick(uint32_t ctrl)
+{
+    uint64_t freq = timrot_freq(ctrl);
+
+    if (freq == 0) {
+        return 0;
+    }
+    return 1000000000LL / (int64_t)freq;
+}
+
+/* current value of RUNNING_COUNTn */
+static uint32_t timrot_count(MxsTimrotState *s, int n)
+{
+    uint32_t ctrl = s->timctrl[n];
+    int64_t nspt = timrot_ns_per_tick(ctrl);
+
+    if (!s->counting[n] || nspt == 0) {
+        return s->base_count[n];
+    }
+
+    int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->base_ns[n];
+    if (elapsed < 0) {
+        elapsed = 0;
+    }
+    uint64_t ticks = (uint64_t)(elapsed / nspt);
+
+    if (ctrl & TIMCTRL_MATCH_MODE) {
+        /* free-running, wraps around the full 32-bit range */
+        return s->base_count[n] - (uint32_t)ticks;
+    }
+
+    /* fixed-count mode: clamps at zero */
+    if (ticks >= s->base_count[n]) {
+        return 0;
+    }
+    return s->base_count[n] - (uint32_t)ticks;
+}
+
+/* freeze the current count value into the shadow state */
+static void timrot_freeze(MxsTimrotState *s, int n)
+{
+    s->base_count[n] = timrot_count(s, n);
+    s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+/*
+ * The QEMUTimer callback needs the device plus the timer index; use a
+ * small thunk array instead of embedding structs.
+ */
+typedef struct TimrotCb {
+    MxsTimrotState *s;
+    int n;
+} TimrotCb;
+
+static TimrotCb timrot_cbs[4];     /* filled in realize (one device) */
+
+/* (re)arm the expiry timer for timer n */
+static void timrot_arm(MxsTimrotState *s, int n)
+{
+    uint32_t ctrl = s->timctrl[n];
+    int64_t nspt = timrot_ns_per_tick(ctrl);
+
+    timer_del(s->tick[n]);
+
+    if (!s->counting[n] || nspt == 0) {
+        return;
+    }
+
+    if (ctrl & TIMCTRL_MATCH_MODE) {
+        if (!(ctrl & TIMCTRL_IRQ_EN)) {
+            return;     /* comparator IRQ is the only event */
+        }
+        /*
+         * Ticks until the running count drops to MATCH_COUNT
+         * (wrap-aware: the count is heading down through 32 bits).
+         */
+        uint32_t delta = s->base_count[n] - s->match_count[n];
+        int64_t when = s->base_ns[n] + delta * nspt;
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+        if (when <= now) {
+            /* match is in the past: next crossing is one wrap away */
+            when = now + (((1ULL << 32) - (uint32_t)(now - when))
+                          / (uint64_t)nspt + 1) * nspt;
+        }
+        timer_mod(s->tick[n], when);
+    } else {
+        /* fixed-count mode: expiry when the count reaches zero */
+        if (s->base_count[n] == 0) {
+            if (ctrl & TIMCTRL_RELOAD && s->fixed_count[n]) {
+                s->base_count[n] = s->fixed_count[n];
+                s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            } else {
+                return;
+            }
+        }
+        timer_mod(s->tick[n],
+                  s->base_ns[n] + s->base_count[n] * nspt);
+    }
+}
+
+static void timrot_expire(void *opaque)
 {
     TimrotCb *cb = opaque;
     MxsTimrotState *s = cb->s;
     int n = cb->n;
+    uint32_t ctrl = s->timctrl[n];
 
-    if (ptimer_get_count(s->timer[n]) == 0 &&
-        (s->timctrl[n] & TIMCTRL_IRQ_EN)) {
+    if (ctrl & TIMCTRL_MATCH_MODE) {
+        /* running count just crossed MATCH_COUNT going down */
+        if (ctrl & TIMCTRL_IRQ_EN) {
+            s->timctrl[n] |= TIMCTRL_IRQ;
+            qemu_set_irq(s->irq[n], 1);
+        }
+        if (ctrl & TIMCTRL_RELOAD) {
+            /* counter restarts from FIXED_COUNT on match */
+            s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->base_count[n] = s->fixed_count[n];
+        }
+        /* comparator stays armed for the next wrap crossing */
+        timrot_arm(s, n);
+        return;
+    }
+
+    /* fixed-count expiry */
+    if (ctrl & TIMCTRL_IRQ_EN) {
         s->timctrl[n] |= TIMCTRL_IRQ;
         qemu_set_irq(s->irq[n], 1);
+    }
+    if (ctrl & TIMCTRL_RELOAD) {
+        s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->base_count[n] = s->fixed_count[n];
+        timrot_arm(s, n);
+    } else {
+        s->counting[n] = false;
+        s->base_count[n] = 0;
+        s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     }
 }
 
 static void timctrl_updated(MxsTimrotState *s, int n)
 {
-    uint64_t freq = timrot_freq(s->timctrl[n]);
+    uint32_t ctrl = s->timctrl[n];
+    bool want_run = timrot_freq(ctrl) != 0;
 
-    ptimer_transaction_begin(s->timer[n]);
-    if (freq == 0) {
-        ptimer_stop(s->timer[n]);
-    } else {
-        ptimer_set_freq(s->timer[n], freq);
-        uint32_t cnt = ptimer_get_count(s->timer[n]);
-        if (cnt == 0) {
-            cnt = s->fixed_count[n];
-        }
-        if (s->timctrl[n] & TIMCTRL_RELOAD) {
-            ptimer_set_count(s->timer[n], s->fixed_count[n]);
-            ptimer_set_limit(s->timer[n], s->fixed_count[n], 1);
-        } else {
-            ptimer_set_count(s->timer[n], cnt);
-        }
-        ptimer_run(s->timer[n], 0);
+    if (want_run && !s->counting[n]) {
+        /* (re)start counting from the current shadow value */
+        s->counting[n] = true;
+        s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    } else if (!want_run && s->counting[n]) {
+        timrot_freeze(s, n);
+        s->counting[n] = false;
     }
-    ptimer_transaction_commit(s->timer[n]);
+
+    if ((ctrl & TIMCTRL_UPDATE) && !(ctrl & TIMCTRL_MATCH_MODE)) {
+        /* UPDATE transfers FIXED_COUNT into the running count */
+        s->base_count[n] = s->fixed_count[n];
+        s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
+
+    timrot_arm(s, n);
 }
 
 static uint64_t timrot_read(void *opaque, hwaddr addr, unsigned size)
@@ -139,7 +279,7 @@ static uint64_t timrot_read(void *opaque, hwaddr addr, unsigned size)
         return s->rotcount;
     }
     /* VERSION register */
-    if (reg >= 0x150 && reg < 0x2000) {
+    if (reg == TIMROT_VERSION) {
         return (2 << 24);       /* major version 2 (i.MX28) */
     }
 
@@ -149,7 +289,7 @@ static uint64_t timrot_read(void *opaque, hwaddr addr, unsigned size)
             return s->timctrl[n];
         }
         if (reg == TIMROT_RUNNING(n)) {
-            return ptimer_get_count(s->timer[n]);
+            return timrot_count(s, n);
         }
         if (reg == TIMROT_FIXED(n)) {
             return s->fixed_count[n];
@@ -171,13 +311,23 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
     uint32_t reg = addr & ~0xf;
     uint32_t off = addr & 0xf;
 
+    qemu_log_mask(LOG_TRACE, "timrot: write 0x%03x off %u = 0x%08x\n",
+                  (unsigned)reg, off, (uint32_t)value);
+
     if (reg == 0x00) {
-        if (off == 0) {
+        switch (off) {
+        case 0:
             s->rotctrl = value;
-        } else if (off == 4) {
+            break;
+        case 4:
             s->rotctrl |= value;
-        } else if (off == 8) {
+            break;
+        case 8:
             s->rotctrl &= ~value;
+            break;
+        case 12:
+            s->rotctrl ^= value;
+            break;
         }
         return;
     }
@@ -213,22 +363,23 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
         }
         if (reg == TIMROT_FIXED(n)) {
             s->fixed_count[n] = value;
-            ptimer_transaction_begin(s->timer[n]);
-            ptimer_set_count(s->timer[n], value);
-            if (s->timctrl[n] & TIMCTRL_RELOAD) {
-                ptimer_set_limit(s->timer[n], value, 1);
+            if (!(s->timctrl[n] & TIMCTRL_MATCH_MODE)) {
+                s->base_count[n] = value;
+                s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             }
-            ptimer_transaction_commit(s->timer[n]);
+            timrot_arm(s, n);
             return;
         }
         if (reg == TIMROT_RUNNING(n)) {
-            ptimer_transaction_begin(s->timer[n]);
-            ptimer_set_count(s->timer[n], value);
-            ptimer_transaction_commit(s->timer[n]);
+            s->base_count[n] = value;
+            s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->counting[n] = timrot_freq(s->timctrl[n]) != 0;
+            timrot_arm(s, n);
             return;
         }
         if (reg == TIMROT_MATCH(n)) {
             s->match_count[n] = value;
+            timrot_arm(s, n);
             return;
         }
     }
@@ -254,12 +405,12 @@ static void timrot_reset(DeviceState *dev)
     memset(s->timctrl, 0, sizeof(s->timctrl));
     memset(s->fixed_count, 0, sizeof(s->fixed_count));
     memset(s->match_count, 0, sizeof(s->match_count));
+    memset(s->base_count, 0, sizeof(s->base_count));
+    memset(s->base_ns, 0, sizeof(s->base_ns));
+    memset(s->counting, 0, sizeof(s->counting));
 
     for (int n = 0; n < 4; n++) {
-        ptimer_transaction_begin(s->timer[n]);
-        ptimer_stop(s->timer[n]);
-        ptimer_set_count(s->timer[n], 0);
-        ptimer_transaction_commit(s->timer[n]);
+        timer_del(s->tick[n]);
         qemu_set_irq(s->irq[n], 0);
     }
 }
@@ -282,10 +433,10 @@ static void timrot_realize(DeviceState *dev, Error **errp)
     MxsTimrotState *s = MXS_TIMROT(dev);
 
     for (int n = 0; n < 4; n++) {
-        s->cb[n].s = s;
-        s->cb[n].n = n;
-        s->timer[n] = ptimer_init(timrot_timer_expire, &s->cb[n],
-                                  PTIMER_POLICY_LEGACY);
+        timrot_cbs[n].s = s;
+        timrot_cbs[n].n = n;
+        s->tick[n] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                  timrot_expire, &timrot_cbs[n]);
     }
 }
 
