@@ -445,6 +445,7 @@ static void imx28_init(Object *obj)
 
     for (int i = 0; i < 4; i++) {
         s->ssp[i] = qdev_new(TYPE_MXS_SSP);
+        MXS_SSP(s->ssp[i])->id = i;
         object_property_add_child(obj, g_strdup_printf("ssp%d", i),
                                   OBJECT(s->ssp[i]));
     }

@@ -133,6 +133,16 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
         MxsSspState *ssp = (!s->is_apbx && ch < 4) ? s->ssp[ch] : NULL;
         MxsI2cState *i2c = NULL;
 
+        /*
+         * The hardware consumes one semaphore slot per descriptor as it
+         * takes it from NXTCMDAR; software (the Freescale DKA library)
+         * polls SEMA.PHORE to observe the progress, so the decrement
+         * must be visible per descriptor.
+         */
+        if (s->sema[ch] & 0xff) {
+            s->sema[ch]--;
+        }
+
         if (s->is_apbx) {
             if (ch == MXS_APBX_CH_I2C0) {
                 i2c = s->i2c[0];
@@ -170,6 +180,19 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
             break;
         case 1: /* WRITE: peripheral -> memory */
             if (ssp) {
+                /*
+                 * A data descriptor can carry PIO words: the hardware
+                 * writes them into the peripheral first, and the CTRL0
+                 * word (with RUN|DATA_XFER) both starts the SD command
+                 * and arms the data phase.  The Freescale WinCE DKA
+                 * builds every SSP data transfer this way - skipping
+                 * the PIO phase leaves the SSP without a pending data
+                 * command and the transfer fails with zeroed data.
+                 */
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_ssp_dma_pio(ssp, i, pio[i]);
+                }
+                mxs_ssp_dma_pio(ssp, -1, 0);
                 mxs_ssp_dma_data(ssp, false, bufaddr, xfer);
             } else if (i2c) {
                 mxs_i2c_dma_data(i2c, false, bufaddr, xfer);
@@ -183,6 +206,10 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
             break;
         case 2: /* READ: memory -> peripheral */
             if (ssp) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_ssp_dma_pio(ssp, i, pio[i]);
+                }
+                mxs_ssp_dma_pio(ssp, -1, 0);
                 mxs_ssp_dma_data(ssp, true, bufaddr, xfer);
             } else if (i2c) {
                 mxs_i2c_dma_data(i2c, true, bufaddr, xfer);
@@ -341,6 +368,9 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
         addr < DMA_REG_NXTCMDAR(MXS_DMA_CHANNELS)) {
         int ch = (addr - 0x110) / 0x70;
         off = (addr - 0x110) % 0x70;
+        qemu_log_mask(LOG_TRACE,
+                      "mxs-dma: ch%d write off 0x%02x = 0x%08x\n",
+                      ch, off, (uint32_t)value);
         switch (off) {
         case 0x00:  /* NXTCMDAR */
             s->nxctmdar[ch] = value;
@@ -348,15 +378,38 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
         case 0x30:  /* SEMA: PHORE field increments and starts the channel */
         {
             uint32_t phore = value & 0xff;
+            s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
             if (phore) {
-                s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
                 mxs_dma_run_channel(s, ch);
-            } else {
-                s->sema[ch] = value;
             }
             return;
         }
-        default:
+        case 0x34:  /* SEMA.SET: increment PHORE, start if non-zero */
+        {
+            /*
+             * The Freescale i.MX28 WinCE CSP/DKA releases the channel
+             * semaphore through the SET register ("str rX, [rY, #0x34]")
+             * and then polls SEMA.PHORE until the hardware consumes the
+             * descriptor.  Ignoring SET stalls every bus request after
+             * the first command of the chain.
+             */
+            uint32_t phore = ((s->sema[ch] & 0xff) + (value & 0xff)) & 0xff;
+            s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
+            if (phore) {
+                mxs_dma_run_channel(s, ch);
+            }
+            return;
+        }
+        case 0x38:  /* SEMA.CLR: decrement PHORE */
+        {
+            uint32_t phore = s->sema[ch] & 0xff;
+            uint32_t dec = value & 0xff;
+
+            phore = phore > dec ? phore - dec : 0;
+            s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
+            return;
+        }
+        default:    /* TOG and unknown */
             return;
         }
     }

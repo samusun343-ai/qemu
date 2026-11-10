@@ -145,7 +145,7 @@ static void mxs_ssp_execute(MxsSspState *s)
     req.arg = s->cmd1;
     req.crc = 0;
 
-    qemu_log_mask(LOG_TRACE, "mxs-ssp: CMD%d arg 0x%08x (ctrl0 0x%08x)\n",
+    qemu_log_mask(LOG_TRACE, "mxs-ssp%d: CMD%d arg 0x%08x (ctrl0 0x%08x)\n", s->id,
                   req.cmd, req.arg, s->ctrl0);
 
     if (!sdbus_get_inserted(&s->sdbus)) {
@@ -209,6 +209,15 @@ static void mxs_ssp_execute(MxsSspState *s)
     /* raise the "transfer complete" event so a DMA engine waiting on
      * WAIT4END completes */
     s->status |= STATUS_DMAEND;
+
+    /*
+     * CTRL0.RUN auto-clears when the command finishes (i.MX28 RM:
+     * "RUN is cleared automatically when the command is complete").
+     * Software that drives the SSP from the CPU polls RUN == 0 for
+     * command completion - the WinCE sdhc PDD does exactly that after
+     * CMD23, so the bit must not stick.
+     */
+    s->ctrl0 &= ~CTRL0_RUN;
 }
 
 /* ------------------------------------------------------------------ */
@@ -264,7 +273,7 @@ int mxs_ssp_dma_pio(MxsSspState *s, int word_idx, uint32_t value)
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "mxs-ssp: dma pio word %d (0x%08x) ignored\n",
+                      "mxs-ssp%d: dma pio word %d (0x%08x) ignored\n", s->id,
                       word_idx, value);
         break;
     }
@@ -279,7 +288,7 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
     MemTxResult res;
 
     qemu_log_mask(LOG_TRACE,
-                  "mxs-ssp: dma %s %u bytes at 0x%" HWADDR_PRIx "\n",
+                  "mxs-ssp%d: dma %s %u bytes at 0x%" HWADDR_PRIx "\n", s->id,
                   to_device ? "write" : "read", len, bufaddr);
 
     if (to_device) {
@@ -291,7 +300,7 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
     } else {
         if (!(s->ctrl0 & CTRL0_DATA_XFER) || !s->data_dir_read) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "mxs-ssp: dma read without pending read data\n");
+                          "mxs-ssp%d: dma read without pending read data\n", s->id);
             g_free(buf);
             return -1;
         }
@@ -383,7 +392,7 @@ static uint64_t mxs_ssp_read(void *opaque, hwaddr addr, unsigned size)
         return s->version;
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "mxs-ssp: unimplemented read 0x%" HWADDR_PRIx "\n",
+                      "mxs-ssp%d: unimplemented read 0x%" HWADDR_PRIx "\n", s->id,
                       addr);
         return 0;
     }
@@ -480,7 +489,7 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         s->timing = value;
         return;
     case SSP_CTRL1:
-        qemu_log_mask(LOG_TRACE, "mxs-ssp: CTRL1 %s 0x%08x\n",
+        qemu_log_mask(LOG_TRACE, "mxs-ssp%d: CTRL1 %s 0x%08x\n", s->id,
                       off == 0 ? "REG" : off == 4 ? "SET" :
                       off == 8 ? "CLR" : "TOG", (uint32_t)value);
         switch (off) {
@@ -518,8 +527,8 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         return;
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "mxs-ssp: unimplemented write 0x%" HWADDR_PRIx
-                      " = 0x%" PRIx64 "\n", addr, value);
+                      "mxs-ssp%d: unimplemented write 0x%" HWADDR_PRIx
+                      " = 0x%" PRIx64 "\n", s->id, addr, value);
         return;
     }
 }
