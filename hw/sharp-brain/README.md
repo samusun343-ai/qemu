@@ -160,6 +160,64 @@ plain PC keys map 1:1; Brain-specific keys that have no PC equivalent
 英和, marker, jump...) are reached through key combinations
 (see `brain-kbd.c` for the exact table).
 
+## WinCE suspend/resume (works end to end)
+
+The power manager's auto-suspend cycle runs the complete real-firmware
+flow inside the emulator:
+
+    WinCE idle timeout
+      -> all PDD PowerDown handlers (display, SD, I2C, battery, USB...)
+      -> VMC_PowerDown: kernel context saved to the blob at PA 0x400e8400,
+         resume stub copied into IRAM, DRAM self-refresh requested,
+         POWER_RESET.PWD written with the 0x3e77 unlock key
+      -> POWER_RESET.PWD = the automatic power cycle the real i.MX28
+         performs while 5V is present: guest reset (DRAM survives,
+         like self-refreshed DRAM on hardware)
+      -> boot ROM re-runs the SB stream (stage0 + EBOOT)
+      -> EBOOT CheckResumeInfo: blob checksums valid -> resume path
+      -> EBOOT restores cp15 + banked registers, jumps to the kernel
+         resume entry (blob+0x38)
+      -> kernel OEMResume, PMWM_EDPOWERONOFF ON (display back on),
+         all PDD PowerUp handlers
+
+With no user input the PM cycles suspend/resume indefinitely, exactly
+like a real device sitting on USB power.  QEMU-divergence fixes needed
+for this (see the individual file comments for details):
+
+* `cp15 c9/CRm=1` RAZ/WI (registered from the SoC model - no upstream
+  `target/arm` change): OEMSaveCpuContext blindly saves the ARM926EJ-S
+  test/lockdown register space; unknown-cp15 reads used to raise UNDEF
+  and crash the suspend thread inside nk.exe.
+* `POWER_RESET`/`CLKCTRL_RESET` handling in `misc.c`: PWD (unlock key
+  0x3e77) = power-cycle reset, PWD_OFF = emulator shutdown, CLKCTRL
+  RESET.CHIP = software reboot.
+* SIMDBG block as persistent storage: EBOOT parks resume scratch
+  across the power-cycle reset there.
+* EBOOT resume fixup in `bootrom.c` (pattern-matched at SB LOAD time):
+  the MMU-off continuation jump and the position-dependent final-phase
+  VA computation are redirected to their still-mapped VAs, and the
+  context-blob literal is retargeted from PA to the uncached alias VA.
+  (Real hardware executes the instruction after the SCTLR write from
+  the pipeline; QEMU ends the TB there and re-fetches under the new
+  MMU state - the same divergence already worked around for the DVFS
+  trampolines with the IRAM mirror.)
+
+The EBOOT splash screen renders on the LCDIF console during boot; the
+kernel's display driver scans out the framebuffer at PA 0x40100000
+continuously.
+
+## Known issue: the FAT volumes never mount (no shell/UI)
+
+After all drivers load (including the GWES display/touch/keyboard
+DDIs) the system goes idle and the PM auto-suspends.  The dictionary
+launcher never starts: block-layer tracing shows the WinCE storage
+manager never reads the FAT16/FAT32 partitions at all (zero reads
+past the OS partition), so no volume mounts and no launcher EXE
+(WCEPRJ.EXE / the \SHARP startup folder on FAT32) can load.  The
+screen stays black because the framebuffer simply contains no UI.
+Tracking the mount chain (FSDMGR / the Sharp "FST" manager seen in
+`[FST]HandleAddDevice` logs) is the next milestone.
+
 ## References
 
 * eMMC dump: samusun343-ai/wince-imgs, release tag `emmc`

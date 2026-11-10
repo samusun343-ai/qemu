@@ -113,6 +113,7 @@ static void panel_advance(MxsLcdifPriv *s)
 /* write one RGB565 pixel into the GRAM at the current position */
 static void panel_pixel(MxsLcdifPriv *s, uint16_t rgb565)
 {
+
     uint32_t x = s->gram_x, y = s->gram_y;
 
     /* apply MY/MX mirror around the panel edges */
@@ -547,6 +548,7 @@ int mxs_lcdif_dma_data(MxsLcdifPriv *s, bool to_device,
 static void lcdif_reset(DeviceState *dev)
 {
     MxsLcdifPriv *s = MXS_LCDIF(dev);
+
 
     s->ctrl = 0;
     s->ctrl1 = 0;

@@ -236,7 +236,6 @@ static const QemuInputHandler lradc_handler = {
 static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
 {
     MxsLradcState *s = opaque;
-
     switch (offset & ~0xcull) {
     case HW_LRADC_CTRL0:
         return s->ctrl0;
@@ -285,6 +284,7 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
     return 0;
 }
 
+/* dbg wrapper */
 static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
                         unsigned size)
 {
@@ -403,6 +403,7 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
                   "mxs-lradc: write to unknown reg 0x%" HWADDR_PRIx
                   " = 0x%" PRIx64 "\n", offset, val);
 }
+
 
 static const MemoryRegionOps lradc_ops = {
     .read = lradc_read,
