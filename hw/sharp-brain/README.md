@@ -253,6 +253,37 @@ the mount path.  Next step: disassemble the sdhc.dll/sdbus2.dll
 scatter-read path from the nk.nb0 (XIP at PA 0x40200000 in the RAM
 dump) and find the divergence.
 
+Breakthrough (Nov 11 2026, later): the mount chain now reads REAL
+sectors.  Three APBH/SSP divergences were fixed (see the hw/sharp-brain
+commits): APBH SEMA is released through the SET register (+0x34) by the
+Freescale CSP/DKA and polled back through PHORE; DMA data descriptors
+carry PIO words that must be written into the SSP first (their CTRL0
+word with RUN|DATA_XFER starts the SD command and arms the data phase);
+CTRL0.RUN auto-clears on completion.  After the fixes the WinCE storage
+manager walks the whole edna2_SDMemory -> SDBus -> SDHC -> APBH -> SSP
+chain and mspart/FSDMGR issue CMD17s to the DSK_Init region sectors
+(0x27800, 0x47800, 0x9200f = the FAT16 BPB, 0x18c809 = the FAT32 BPB)
+and get real data back.
+
+The mount still stops right after the partition BPB reads (no FAT-area
+reads, screen stays black).  Facts established from the OS image for
+the next round:
+
+* the FAT FSD is `exfat.dll` (the unified WinCE6 FSD) - there is no
+  fatfsd/tfat.dll in the ROM; the registry sets
+  DefaultFileSystem=EXFAT / Dll=exfat.dll
+* the DSK stack: edna2_SDMemory.dll (eMMC, "NandDic" profile) and
+  edna2_UserSDMemory.dll (the microSD/user DSK), with RoFilter.dll,
+  cachefilt.dll, diskcache.dll and the BLOCK_* drivers as filters
+* the FAT16/FAT32 partition BPBs are valid (MSWIN4.1, 512B sectors);
+  the 8GiB card is sector-addressed and both EBOOT (which reads the NK
+  image out of a file on the FAT16 volume) and the WinCE drivers use
+  LBA arguments consistently
+
+Next milestone: find where the exfat FSD attach aborts after the BPB
+read (volume-open validation, filter stack load order, or a geometry
+ioctl answer).
+
 ## Known issue: microSD enumeration stops before the bus
 
 The BSP reads card presence through the LRADC card-detect channels
