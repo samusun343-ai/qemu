@@ -218,6 +218,22 @@ screen stays black because the framebuffer simply contains no UI.
 Tracking the mount chain (FSDMGR / the Sharp "FST" manager seen in
 `[FST]HandleAddDevice` logs) is the next milestone.
 
+Update (Nov 2026): the mount chain has been traced end to end with the
+tools in tools/. The storage manager (FSDMGR + mspart, running in the
+driver host process) DOES knock on every DSK after registration: it
+queries geometry (ioctl 0x71C00/0x71C24), the profile name (0x71800,
+"NandDic") and then issues scatter reads (ioctl 0x75C08, 28-byte SG
+request {start, count, ..., buf, 0x200}). In the emulator those reads
+"complete" successfully but return an all-zero buffer and no SD command
+is ever issued: the request dies somewhere between edna2_SDMemory.dll
+(NDF device), sdbus2.dll (SD bus) and sdhc.dll (SHC host controller),
+so mspart sees a zero sector 0 (no MBR) and never mounts. The remaining
+work is finding where in that chain the request is dropped; module
+bases in the driver-host process are stable across boots (FSDMGR
+0xc0330000, mspart 0xc0360000, sdbus2 0xc0500000, sdhc 0xc0780000,
+edna2_SDMemory 0xc07d1000, block_readonly 0xc07e0000, block_writable
+0xc0800000/0xc0810000/0xc0820000, block_com 0xc0850000).
+
 ## Known issue: microSD enumeration stops before the bus
 
 The BSP reads card presence through the LRADC card-detect channels
