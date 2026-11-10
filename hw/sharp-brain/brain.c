@@ -75,6 +75,13 @@ static void brain_init(MachineState *machine)
         carddev = qdev_new(TYPE_SD_CARD);
         qdev_prop_set_drive_err(carddev, "drive", blk, &error_fatal);
         qdev_realize_and_unref(carddev, bus, &error_fatal);
+        /*
+         * Card-detect: the BSP reads the microSD slot's CD level
+         * through LRADC channel 5 (the SSP1 card-detect pad routed as
+         * an analog input); a present card reads low.
+         */
+        MXS_LRADC(s->soc.lradc)->sd_card_present = true;
+        mxs_pinctrl_set_input(s->soc.pinctrl, 0, 1u << 0, 1);
     }
 
     /* GPIO matrix keyboard (PW-SH6 layout; per-lineage board data) */

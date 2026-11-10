@@ -136,6 +136,7 @@ static void mxs_ssp_fill_fifo(MxsSspState *s);
 
 static void mxs_ssp_execute(MxsSspState *s)
 {
+
     SDRequest req;
     uint8_t resp[16];
     size_t rlen;

@@ -313,6 +313,9 @@ struct MxsLradcState {
     uint32_t status;
     uint32_t ch[MXS_LRADC_NUM_CH];
     uint32_t delay[4];
+
+    /* microSD slot card-detect level (LRADC channel 5) */
+    bool sd_card_present;
     uint32_t conversion;
     uint32_t threshold[2];
 

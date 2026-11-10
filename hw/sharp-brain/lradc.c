@@ -134,6 +134,20 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
     if (ch == 7) {
         return 3000;          /* Li-ion battery ~75% */
     }
+    /*
+     * Card-detect channels: the SSP0/SSP1 card-detect pads are routed
+     * to LRADC channels 4/5 as analog inputs (the EBOOT/BSP
+     * BSPSDHCIsCardPresent() reads them through the LRADC value
+     * registers).  A closed (present) card switch reads low; the
+     * soldered eMMC on channel 4 is always present, the microSD slot
+     * on channel 5 reflects the inserted state.
+     */
+    if (ch == 4) {
+        return 0;             /* eMMC: always present */
+    }
+    if (ch == 5) {
+        return s->sd_card_present ? 0 : 4095;
+    }
     return 0;
 }
 
