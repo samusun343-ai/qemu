@@ -218,6 +218,17 @@ screen stays black because the framebuffer simply contains no UI.
 Tracking the mount chain (FSDMGR / the Sharp "FST" manager seen in
 `[FST]HandleAddDevice` logs) is the next milestone.
 
+## Known issue: microSD enumeration stops before the bus
+
+The BSP reads card presence through the LRADC card-detect channels
+(CH4 = eMMC, always present; CH5 = microSD, modelled from the
+attached drive image - see lradc.c).  With a card image on
+`if=sd,index=1`, EBOOT's detection chain (0x400795b8 in the dump)
+still exits "NO SD card1" before any SD command reaches SSP1 -
+one of its early setup sub-calls fails in the emulator.  The slot
+wiring itself (SSP1 sd-bus + CD level) is in place; following the
+chain call by call is the remaining work for microSD support.
+
 ## References
 
 * eMMC dump: samusun343-ai/wince-imgs, release tag `emmc`
