@@ -234,6 +234,25 @@ bases in the driver-host process are stable across boots (FSDMGR
 edna2_SDMemory 0xc07d1000, block_readonly 0xc07e0000, block_writable
 0xc0800000/0xc0810000/0xc0820000, block_com 0xc0850000).
 
+Update (Nov 11 2026): full 6.6GB eMMC image reconstructed from the
+split release assets and re-verified - boot behaviour is identical, so
+the blocker is guest-driver-side, not an image artifact.  Boot
+timeline with per-10s SSP command counts (qemu-dbg.log, CMD* traces):
+
+    t<10s    EBOOT: 242 SSP commands (NK read from the OS partition)
+    t=20s    [FST]HandleAddDevice + DSK_Init regions - 405 commands
+    t=20-190s  idle, NO new SSP activity (405 -> 409)
+    t>200s   PM suspend/resume cycles (409 -> 424, resume re-init)
+
+So after the SD bus finishes enumerating the eMMC (CMD0/CMD8/CMD55/
+CMD1/CMD2/CMD3/CMD9/CMD7/CMD16 + eMMC CMD6 SWITCH to 8-bit @52MHz,
+all with correct responses and SSP IRQ 96 pulses), FSDMGR's scatter
+reads still never reach the SSP.  The previously observed CMD17/18
+traffic in the debug log is all bootloader/kernel image loading, not
+the mount path.  Next step: disassemble the sdhc.dll/sdbus2.dll
+scatter-read path from the nk.nb0 (XIP at PA 0x40200000 in the RAM
+dump) and find the divergence.
+
 ## Known issue: microSD enumeration stops before the bus
 
 The BSP reads card presence through the LRADC card-detect channels
