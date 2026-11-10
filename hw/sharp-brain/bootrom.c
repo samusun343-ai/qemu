@@ -463,6 +463,162 @@ static bool bootrom_do_call(uint32_t ivt_addr)
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* EBOOT resume-path fixup (QEMU MMU-toggle semantics)                */
+
+/*
+ * The EBOOT resume path ends with this sequence (verified in the
+ * PW-AJ2 dump, VA in EBOOT's 0x80000000-biased DRAM window):
+ *
+ *   ldr   r2, [pc, #0x1ac]     ; r2 = VA of the MMU-off continuation
+ *   mov   r3, #0x40000000
+ *   sub   r2, r2, r3           ; r2 = PA of the continuation
+ *   mrc   p15, 0, r1, c1, c0, 0
+ *   bic   r1, ... (x3)         ; clear MMU/I/D-cache bits
+ *   mcr   p15, 0, r1, c1, c0, 0    ; MMU OFF
+ *   mov   pc, r2               ; jump to the PA (identity execution)
+ *
+ * and the continuation then restores cp15 state from the saved
+ * kernel context blob, re-enables the MMU (jumping to the uncached
+ * alias VA 0xc007xxxx, which is valid under the restored kernel
+ * page tables) and finally jumps to the kernel resume entry
+ * (blob+0x38, a kernel VA).
+ *
+ * Real hardware executes the `mov pc, r2` right after the MMU-off
+ * MCR straight from the pipeline.  QEMU ends the TB at the SCTLR
+ * write and re-fetches the next instruction under the new MMU state:
+ * the fetch at VA 0x80071ce4 now hits physical 0x80071ce4 - the
+ * AUART3 register file - and execution slides off through the
+ * peripheral space (the same class of divergence already worked
+ * around for the DVFS trampolines with the IRAM mirror).
+ *
+ * Patch (applied to the EBOOT image when the boot ROM loads it,
+ * pattern-matched so an unknown EBOOT build is left untouched):
+ *
+ *   - `mov r3, #0x40000000` -> `mov r3, #0`     : r2 stays the VA
+ *   - the MMU-off `mcr`     -> `nop`            : MMU stays enabled
+ *
+ * so the jump lands on the same code at its (still-mapped) VA
+ * 0x80071cec.  The continuation loads the context-blob pointer from
+ * a literal that holds its physical address (0x400e8400) - valid
+ * for the MMU-off identity execution the sequence was written for,
+ * but unmapped with the MMU on - so the literal is patched to the
+ * uncached alias VA (PA + 0x60000000, e.g. 0xa00e8400).
+ *
+ * The continuation ends with a second, position-dependent VA
+ * computation:
+ *
+ *   add  r2, pc, #0x14        ; r2 = continuation VA
+ *   mov  r3, #0x40000000
+ *   sub  r2, r2, r3           ; PA-identity "VA minus DRAM base"
+ *   mov  r4, #0x80000000
+ *   add  r4, r4, r2           ; r4 = cached VA of the final phase
+ *   mcr  p15, r1, c1, c0, 0   ; SCTLR := saved value (MMU on)
+ *   mov  pc, r4
+ *
+ * Running at PA identity this computes the cached VA (0x80071e20,
+ * where the kernel page tables map DRAM cached); running at the
+ * 0x80000000-biased VA it would compute 0xc0071e20, which the
+ * kernel tables map somewhere else entirely.  Patch it the same
+ * way: `mov r3, #0` and `add r4, r4, r2` -> `mov r4, r2`, keeping
+ * the final jump on the mapped cached VA.  Everything after that
+ * (TTBR/SCTLR restore from the blob, the final `mov pc, lr` into
+ * the kernel resume entry) already works under QEMU's re-fetch
+ * semantics because both the EBOOT and kernel page tables map the
+ * same 0x80000000-biased DRAM window.
+ */
+static void bootrom_patch_eboot(uint8_t *img, uint32_t count)
+{
+    static const uint32_t pattern[] = {
+        0xe3a03101,     /* mov r3, #0x40000000      */
+        0xe0422003,     /* sub r2, r2, r3           */
+        0xee111f10,     /* mrc p15, 0, r1, c1, c0, 0 */
+        0xe3c11c23,     /* bic r1, r1, #0x2300      */
+        0xe3c11005,     /* bic r1, r1, #5           */
+        0xe3c11a01,     /* bic r1, r1, #0x1000      */
+        0xee011f10,     /* mcr p15, 0, r1, c1, c0, 0  (MMU off) */
+        0xe1a0f002,     /* mov pc, r2               */
+    };
+    /* continuation: ldr r0,[pc,#0x17c] (blob PA literal) */
+    const uint32_t cont_ldr = 0xe59f017c;
+    /* final-phase VA computation: mov/add/add/mcr/mov pc */
+    static const uint32_t tail_pattern[] = {
+        0xe28f2014,     /* add r2, pc, #0x14        */
+        0xe3a03101,     /* mov r3, #0x40000000      */
+        0xe0422003,     /* sub r2, r2, r3           */
+        0xe3a04102,     /* mov r4, #0x80000000      */
+        0xe0844002,     /* add r4, r4, r2           */
+        0xee011f10,     /* mcr p15, 0, r1, c1, c0, 0 */
+        0xe1a0f004,     /* mov pc, r4               */
+    };
+
+    if (count < 0x2000) {
+        return;
+    }
+    for (uint32_t off = 0; off + 0x200 <= count; off += 4) {
+        uint32_t i;
+
+        for (i = 0; i < ARRAY_SIZE(pattern); i++) {
+            if (ldl_le_p(&img[off + i * 4]) != pattern[i]) {
+                break;
+            }
+        }
+        if (i != ARRAY_SIZE(pattern)) {
+            continue;
+        }
+
+        /* find the continuation's blob-pointer load just behind */
+        uint32_t ldr_off = 0;
+        for (uint32_t o = off + ARRAY_SIZE(pattern) * 4;
+             o < off + ARRAY_SIZE(pattern) * 4 + 0x20; o += 4) {
+            if (ldl_le_p(&img[o]) == cont_ldr) {
+                ldr_off = o;
+                break;
+            }
+        }
+        if (!ldr_off) {
+            continue;
+        }
+        uint32_t lit_off = ldr_off + 8 + 0x17c;
+        uint32_t blob_pa = ldl_le_p(&img[lit_off]);
+        if (blob_pa < IMX28_DRAM_BASE ||
+            blob_pa >= IMX28_DRAM_BASE + IMX28_DRAM_SIZE) {
+            continue;
+        }
+
+        /* keep the jump target a mapped VA and the MMU enabled */
+        stl_le_p(&img[off + 0], 0xe3a03000);        /* mov r3, #0 */
+        stl_le_p(&img[off + 6 * 4], 0xe1a00000);    /* nop (MMU-off mcr) */
+        /* blob PA -> uncached alias VA */
+        stl_le_p(&img[lit_off], blob_pa + 0x60000000);
+
+        /* find and fix the position-dependent final-phase jump */
+        for (uint32_t o = off + ARRAY_SIZE(pattern) * 4;
+             o + ARRAY_SIZE(tail_pattern) * 4 <= off + 0x400;
+             o += 4) {
+            uint32_t k;
+
+            for (k = 0; k < ARRAY_SIZE(tail_pattern); k++) {
+                if (ldl_le_p(&img[o + k * 4]) != tail_pattern[k]) {
+                    break;
+                }
+            }
+            if (k != ARRAY_SIZE(tail_pattern)) {
+                continue;
+            }
+            stl_le_p(&img[o + 4], 0xe3a03000);     /* mov r3, #0 */
+            stl_le_p(&img[o + 16], 0xe1a04002);    /* mov r4, r2 */
+            break;
+        }
+
+        qemu_log_mask(LOG_TRACE,
+                      "bootrom: EBOOT resume fixup applied at +%#x "
+                      "(blob %#x -> VA %#x)\n",
+                      off, blob_pa, blob_pa + 0x60000000);
+        return;
+    }
+}
+
 /* execute commands until the next CALL/JUMP, or end of stream */
 static bool bootrom_run(void)
 {
@@ -502,6 +658,9 @@ static bool bootrom_run(void)
             }
             qemu_log_mask(LOG_TRACE, "bootrom: +%06u LOAD 0x%08x, %u bytes\n",
                           pos, addr, count);
+            if (addr >= IMX28_DRAM_BASE && count >= 0x2000) {
+                bootrom_patch_eboot(&c[16], count);
+            }
             address_space_write(&address_space_memory, addr,
                                 MEMTXATTRS_UNSPECIFIED, &c[16], count);
             next = (pos + 16 + count + 15) & ~15u;

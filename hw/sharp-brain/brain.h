@@ -117,6 +117,12 @@ struct Imx28State {
     MemoryRegion iram;
     uint8_t *iram_buf;          /* backing store for the IRAM regions */
     /*
+     * SIMDBG block (0x8003c004..0x80040000) as persistent storage:
+     * the EBOOT suspend/resume path parks scratch state there across
+     * the power-cycle reset (see imx28.c).
+     */
+    MemoryRegion simdbg;
+    /*
      * MMIO "mirror" of the IRAM at PA 0xa8000000 (the WinCE uncached
      * alias of IRAM interpreted as a physical address).  The DVFS
      * clock-change trampolines run at the uncached VA and toggle the

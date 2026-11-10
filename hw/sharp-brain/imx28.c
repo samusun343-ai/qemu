@@ -86,7 +86,6 @@ static const struct {
     { "imx28-axi-ahb0", 0x8002e000, 0x2000 },
     { "imx28-can0",     0x80032000, 0x2000 },
     { "imx28-can1",     0x80034000, 0x2000 },
-    { "imx28-simdbg",   0x8003c004, 0x3ffc }, /* bootrom mailbox at +0 */
     { "imx28-usb0",     0x80080000, 0x10000 },
     { "imx28-usb1",     0x80090000, 0x10000 },
     { "imx28-dflpt",    0x800c0000, 0x2000 },
@@ -206,6 +205,23 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                           "imx28.iram-mirror", IMX28_IRAM_SIZE);
     memory_region_add_subregion(get_system_memory(), 0xa8000000,
                                 &s->iram_mirror);
+
+    /*
+     * SIMDBG block (0x8003c000..0x80040000, u-boot regs-base.h:
+     * SIMDBG/SIMGPMISEL/SIMSSPSEL/SIMMEMSEL/GPIOMON/SIMENET/ARMJTAG).
+     * The EBOOT firmware uses parts of this debug block (notably the
+     * 0x8003d5xx scratch words) as storage across the suspend
+     * power-cycle: the suspend path parks state there, the post-reset
+     * resume path reads it back to find the kernel resume entry.
+     * A read-as-zero/write-discard region makes the resume path jump
+     * to garbage, so model the whole block as persistent storage.
+     * The first word (0x8003c000) is the boot ROM mailbox, mapped
+     * separately by brain_bootrom_setup(); this region starts at +4.
+     */
+    memory_region_init_ram(&s->simdbg, OBJECT(dev), "imx28.simdbg",
+                           0x4000 - 4, &error_fatal);
+    memory_region_add_subregion(get_system_memory(), 0x8003c004,
+                                &s->simdbg);
 
     /* ICOLL */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->icoll), errp)) {

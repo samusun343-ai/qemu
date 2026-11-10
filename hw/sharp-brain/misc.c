@@ -27,6 +27,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/core/irq.h"
+#include "system/runstate.h"
 #include "brain.h"
 
 typedef struct MxsMiscState {
@@ -65,6 +66,42 @@ static inline MxsMiscState *MISC_OF(void *obj)
 /* POWER register indexes */
 #define POWER_STS            0x0c
 #define POWER_BATTMONITOR    0x0e
+#define POWER_RESET          0x10
+
+/*
+ * HW_POWER_RESET (+0x100), from u-boot regs-power-mx28.h:
+ *
+ *   bits 31:16  UNLOCK field, key 0x3e77
+ *   bit  2      FASTFALL_PSWITCH_OFF
+ *   bit  1      PWD_OFF - power off and stay off
+ *   bit  0      PWD     - power-down request
+ *
+ * The WinCE suspend trampoline (copied to IRAM by VMC_PowerDown)
+ * writes UNLOCK + PWD as the final step of suspend-to-RAM.  On real
+ * hardware with 5V present the chip powers down and then powers
+ * itself back on automatically (NXP: "The MX28 does not power off if
+ * you have 5V"); the ROM re-runs the boot chain and EBOOT's
+ * CheckResumeInfo finds the kernel's saved resume state still in
+ * (self-refreshed) DRAM, jumping straight to the resume vector.
+ *
+ * POWER_STS models 5V as present, so model PWD as that automatic
+ * power cycle: request a guest reset, which re-runs the boot ROM /
+ * EBOOT / resume chain.  Guest DRAM is not cleared on reset, exactly
+ * like the self-refreshed DRAM on hardware.  PWD_OFF powers the
+ * device off for real, which for a VM means shutting the emulator
+ * down.
+ */
+#define POWER_RESET_UNLOCK_KEY       0x3e770000u
+#define POWER_RESET_FASTFALL_PSWITCH_OFF  (1u << 2)
+#define POWER_RESET_PWD_OFF          (1u << 1)
+#define POWER_RESET_PWD              (1u << 0)
+
+/*
+ * HW_CLKCTRL_RESET (+0x1e0): global chip-reset register (Linux
+ * mach-mxs uses it for reboot: MXS_CLKCTRL_RESET_CHIP = bit 1).
+ */
+#define CLKCTRL_RESET         0x1e
+#define CLKCTRL_RESET_CHIP    (1u << 1)
 
 /*
  * Battery voltage: BATTVAL field (bits 31:16) is in 8 mV steps.
@@ -197,6 +234,28 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
     if (idx == s->ctrl_idx) {
         if (!(old & (1u << 31)) && (s->regs[s->ctrl_idx] & (1u << 31))) {
             s->regs[s->ctrl_idx] |= 1u << 30;
+        }
+    }
+
+    /*
+     * POWER_RESET / CLKCTRL_RESET: chip reset and power-down requests
+     * (see the POWER_RESET comment above).
+     */
+    if (s->kind == KIND_POWER && idx == POWER_RESET) {
+        uint32_t v = s->regs[POWER_RESET];
+
+        if ((v & 0xffff0000u) == POWER_RESET_UNLOCK_KEY) {
+            if (v & POWER_RESET_PWD) {
+                /* 5V present: power down + automatic power-on = reset */
+                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            } else if (v & POWER_RESET_PWD_OFF) {
+                qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+            }
+        }
+    }
+    if (s->kind == KIND_CLKCTRL && idx == CLKCTRL_RESET) {
+        if (s->regs[CLKCTRL_RESET] & CLKCTRL_RESET_CHIP) {
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         }
     }
 
