@@ -95,8 +95,13 @@ static void lradc_update_irq(MxsLradcState *s)
 }
 
 /*
- * Sample the currently selected plate configuration.
- * Returns an 18-bit LRADC value for the given (physical) channel.
+ * Sample one conversion.
+ *
+ * The 4-wire touch plate readings only exist while the pen is down;
+ * every other channel (battery, VDD5V, card detect) is a plain
+ * voltage input and must return its value regardless of the pen.
+ * The old structure returned 0 for *all* channels when the pen was
+ * up, which fed the guest 0 V batteries and a dead card-detect line.
  */
 static uint32_t lradc_sample(MxsLradcState *s, int ch)
 {
@@ -104,27 +109,21 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
     bool x_mode = (plate & BM_CTRL0_XPPSW) && (plate & BM_CTRL0_XNNSW);
     bool y_mode = (plate & BM_CTRL0_YPPSW) && (plate & BM_CTRL0_YNNSW);
     bool p_mode = (plate & BM_CTRL0_YPPSW) && (plate & BM_CTRL0_XNNSW);
-    bool detect = plate & BM_CTRL0_TOUCH_DETECT_EN;
 
     /* full scale ~ 1.85V in 12 bits (LRADC range), values fit 18 bits */
-    if (!s->touch_down) {
-        /* open circuit: no contact, plates float */
-        if (detect) {
-            return 0;         /* no touch */
+    if (s->touch_down) {
+        if (x_mode && ch == CH_YP) {
+            return ((uint64_t)s->x * 4095) / MAX(s->x_max, 1);
         }
-        return 0;
+        if (y_mode && ch == CH_XM) {
+            return ((uint64_t)s->y * 4095) / MAX(s->y_max, 1);
+        }
+        if (p_mode && (ch == CH_YM || ch == CH_XP)) {
+            return 100;       /* some contact resistance */
+        }
     }
 
-    if (x_mode && ch == CH_YP) {
-        return ((uint64_t)s->x * 4095) / MAX(s->x_max, 1);
-    }
-    if (y_mode && ch == CH_XM) {
-        return ((uint64_t)s->y * 4095) / MAX(s->y_max, 1);
-    }
-    if (p_mode && (ch == CH_YM || ch == CH_XP)) {
-        return 100;           /* some contact resistance */
-    }
-    /* battery / voltage channels */
+    /* battery / voltage channels (plain inputs, pen-independent) */
     if (ch == 0) {
         return 3000;          /* Li-ion battery ~75% (divider scaled) */
     }
@@ -168,10 +167,19 @@ static void lradc_convert(MxsLradcState *s, uint32_t chmask)
         if (phys > 7) {
             phys = 7;
         }
-        /* account for oversampling: VALUE = sample * (NUM_SAMPLES+1) */
+        /*
+         * Account for oversampling: VALUE = sample * (NUM_SAMPLES+1).
+         * The TOGGLE bit (ch reg bit 31) inverts at the end of every
+         * conversion on the channel: the i.MX28 DKA/LRADC helpers use
+         * it to recognize that a *new* sample arrived, so a conversion
+         * that never flips TOGGLE looks like a stuck channel to the
+         * guest (EBOOT's BSPSDHCIsCardPresent chain times out and
+         * exits "NO SD card" before any bus command is issued).
+         */
         uint32_t nums = (s->ch[n] >> BP_CH_NUM_SAMPLES) & 0x1f;
         uint32_t val = lradc_sample(s, phys) * (nums + 1);
         s->ch[n] = (s->ch[n] & ~BM_CH_VALUE) | (val & BM_CH_VALUE);
+        s->ch[n] ^= BM_CH_TOGGLE;
         /* conversion complete IRQ (ch n status at bit n) */
         s->ctrl1 |= BM_CTRL1_CH_IRQ(n);
         qemu_set_irq(s->irqs[3 + n],
@@ -250,6 +258,7 @@ static const QemuInputHandler lradc_handler = {
 static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
 {
     MxsLradcState *s = opaque;
+
     switch (offset & ~0xcull) {
     case HW_LRADC_CTRL0:
         return s->ctrl0;
@@ -264,6 +273,8 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
         return s->ctrl4;
     case HW_LRADC_STATUS:
     {
+        qemu_log_mask(LOG_TRACE, "mxs-lradc: read STATUS -> 0x%08x\n",
+                      s->status);
         uint32_t v = s->status & ~BM_STATUS_TOUCH_RAW;
         if (s->touch_down) {
             v |= BM_STATUS_TOUCH_RAW | BM_STATUS_TOUCH_PRESENT;
@@ -277,6 +288,8 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
     default:
         for (int n = 0; n < MXS_LRADC_NUM_CH; n++) {
             if ((offset & ~0xcull) == HW_LRADC_CH(n)) {
+                qemu_log_mask(LOG_TRACE,
+                              "mxs-lradc: read CH%d -> 0x%08x\n", n, s->ch[n]);
                 return s->ch[n];
             }
         }
@@ -304,6 +317,8 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
 {
     MxsLradcState *s = opaque;
 
+    qemu_log_mask(LOG_TRACE, "mxs-lradc: write 0x%03x = 0x%08x\n",
+                  (uint32_t)offset, (uint32_t)val);
     switch (offset & ~0xcull) {
     case HW_LRADC_CTRL0:
     {

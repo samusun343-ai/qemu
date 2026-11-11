@@ -242,32 +242,56 @@ boot - most completions go through driver timeout paths).  First boot
 to the dictionary menu therefore takes a long wall time.  Improving
 IRQ fidelity should recover most of it.
 
-## Known issue: microSD enumeration stops before the bus
+## Known issue: microSD enumeration - mapped to one EBOOT gate word
 
-The BSP reads card presence through the LRADC card-detect channels
-(CH4 = eMMC, always present; CH5 = microSD, modelled from the
-attached drive image - see lradc.c).  With a card image on
-`if=sd,index=1`, EBOOT's detection chain (0x400795b8 in the dump)
-still exits "NO SD card1" before any SD command reaches SSP1 -
-one of its early setup sub-calls fails in the emulator.  The slot
-wiring itself (SSP1 sd-bus + CD level) is in place; following the
-chain call by call is the remaining work for microSD support.
+The whole slot-1 path (EBOOT's `g_bSDHCExist[1]` and the kernel-side
+BSPSDHCIsCardPresent) is gated by a single word in EBOOT's global
+work (PA 0x4003e980 + 0):
+
+* EBOOT SDMMC_Init (0x400789c0 in the dump) loops the two slots.  Per
+  slot it calls the probe 0x40071854, which opens the slot's SSP
+  through the DKA (0x4006aa00, SSP1 base 0x80012000), runs the
+  CLKGATE handshake on the DKA register cache, programs CTRL1
+  (0x15506273) plus the clock config, and returns 1.
+* The probe first calls 0x4006fe94(slot).  For slot 1 that function
+  needs the word at EBOOT work+0 (0x4003e980) to be non-zero (slot
+  0's call sets the flag at 0x4003d5a8 and that word).  In the
+  emulator the word stays 0 - verified with a braintrace register
+  dump at the slot-1 dispatch (work reads {0, 1, 0, ...}) - so
+  slot 1 is skipped silently and g_bSDHCExist[1] stays 0.
+* The kernel's BSPSDHCIsCardPresent() then reports "NO SD card1"
+  from the EBOOT table and the slot never reaches SSP1.
+
+The bus wiring itself is complete: SSP1 carries an sd-bus with the
+index=1 drive, and the card-detect level is modelled on LRADC
+channel 5 (a present card reads low; eMMC channel 4 is always low).
+
+Next step: find the writer of PA 0x4003e980 (a watchpoint on the
+EBOOT-phase word, or static work on the chain sub-calls: 0x4007910c
+builds a DKA request through 0x40070eec with a 10-tick timeout check
+at 0x40079170..0x4007917c; 0x40078e5c runs the post-probe chain).
+The kernel-side sdhc.dll slot-1 init is otherwise ready.
 
 ## Other known gaps
 
-* `InitRTC: NO RTC Present!` - EBOOT and the kernel do not find the
-  RTC (rtc.c models the stmp3xxx block; the presence probe fails).
-  The system clock falls back to defaults; fixing the probe answer
-  is cosmetic-grade work.
-* `touchkey_point_calibration() FAILED!` - the EDNA2 TouchKey driver's
-  boot-time calibration aborts; the touch driver still loads
-  (DdsiTouchPanelAttach, PenupDelayThreadProc).  The LRADC touch
-  model answers the conversion sequence but something in the
-  calibration sampling diverges.
-* EBOOT's `LoadBootCFG: failed to load configuration` /
-  `ResetDefaultBootCFG: failed to store configuration to flash` -
-  EBOOT has no flash to store its config (no GPMI/NAND model); it
-  falls back to compiled-in defaults, which match the dump.
+* `InitRTC: NO RTC Present!` (EBOOT and kernel).  rtc.c models the
+  stmp3xxx block; the presence probe still answers in a way EBOOT
+  reads as "absent".  One register-level pass on the probe answers
+  is left to do.
+* `touchkey_point_calibration() FAILED!` (touchkey.cpp:223).  The
+  TouchKey driver still loads (DdsiTouchPanelAttach,
+  PenupDelayThreadProc) but the boot-time calibration aborts before
+  any LRADC CH2/CH3 conversion is issued - the failure happens
+  earlier than the panel sampling (likely a panel-present probe).
+  The LRADC model itself now flips the CH register TOGGLE bit per
+  conversion and returns real values for the non-touch channels.
+* Storage throughput under TCG is low (most request completions go
+  through driver timeout paths; only a handful of SSP IRQ 96 pulses
+  per boot).  Improving IRQ fidelity should speed the WinCE storage
+  stack up considerably.
+* EBOOT's `LoadBootCFG / ResetDefaultBootCFG` flash errors (no
+  GPMI/NAND model) - EBOOT falls back to compiled-in defaults that
+  match the dump.
 
 ## References
 
