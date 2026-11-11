@@ -273,6 +273,22 @@ boot - most completions go through driver timeout paths).  First boot
 to the dictionary menu therefore takes a long wall time.  Improving
 IRQ fidelity should recover most of it.
 
+Status update (2026-11, after the GPIO0_5 strap + RTC fixes): with
+the full image the kernel mounts every eMMC DSK region
+(DSK2/DSK3/DSK5..DSK9), the SDMEMORY idle thread runs, and the
+system cycles complete suspend/resume power management indefinitely
+(`CheckResumeInfo` checksums valid, every PDD PowerDown/PowerUp
+handler including `SHC_PowerDown(1)` for the microSD slot).  The
+LCDIF console shows the boot logo / launcher splash strip (top-left
+region) and the display driver keeps scanning out the framebuffer;
+reaching the full launcher UI needs more wall time under TCG (a
+10-minute run reaches the suspend-cycling steady state).
+
+Measured interrupt activity during a full-image boot (icoll trace):
+TIMROT (48) x449, APBH DMA channel 0 (82) x338, LCDIF (38) x14,
+SSP0/SSP1 error (96/97) x4/x5 - the APBH completion IRQs the storage
+stack waits on are flowing.
+
 ## microSD slot (RESOLVED)
 
 Slot 1 (SSP1) enumerates end to end once the board strap is modelled:
