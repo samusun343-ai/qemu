@@ -288,8 +288,10 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
     MemTxResult res;
 
     qemu_log_mask(LOG_TRACE,
-                  "mxs-ssp%d: dma %s %u bytes at 0x%" HWADDR_PRIx "\n", s->id,
-                  to_device ? "write" : "read", len, bufaddr);
+                  "mxs-ssp%d: dma %s %u bytes at 0x%" HWADDR_PRIx
+                  " (data_remaining=%u xfer_size=%u)\n", s->id,
+                  to_device ? "write" : "read", len, bufaddr,
+                  s->data_remaining, s->xfer_size);
 
     if (to_device) {
         res = address_space_read(&address_space_memory, bufaddr,
@@ -304,12 +306,44 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
             g_free(buf);
             return -1;
         }
-        uint32_t n = MIN(len, s->data_remaining);
-        sdbus_read_data(&s->sdbus, buf, n);
+        /*
+         * A DMA data transfer drains the SSP RX FIFO first: the PIO/kick
+         * sequence that started the command pre-pulled up to 32 FIFO
+         * words (128 bytes) from the card for the CPU path.  Those words
+         * are the head of the data stream, so a DMA-driven read must
+         * deliver them to the descriptor buffer before pulling the
+         * remainder straight from the card.  Skipping the FIFO drain
+         * leaves the first 128 bytes of every DMA-read sector missing,
+         * which corrupts the sector headers the WinCE storage stack
+         * validates (volume BPBs) - the mount chain then dies silently.
+         */
+        uint32_t fifo_bytes = s->fifo_level * 4;
+        uint32_t n = MIN(len, fifo_bytes + s->data_remaining);
+        uint32_t from_fifo = MIN(n, fifo_bytes) & ~3u;
+
+        for (unsigned w = 0; w < from_fifo / 4; w++) {
+            stl_le_p(&buf[w * 4], s->fifo[w]);
+        }
+        if (from_fifo) {
+            memmove(&s->fifo[0], &s->fifo[from_fifo / 4],
+                    (s->fifo_level - from_fifo / 4) * sizeof(uint32_t));
+            s->fifo_level -= from_fifo / 4;
+        }
+        if (n > from_fifo) {
+            sdbus_read_data(&s->sdbus, buf + from_fifo, n - from_fifo);
+            s->data_remaining -= n - from_fifo;
+        } else if (s->data_remaining < n) {
+            s->data_remaining = 0;
+        }
         res = address_space_write(&address_space_memory, bufaddr,
                                   MEMTXATTRS_UNSPECIFIED, buf, n);
-        s->data_remaining -= n;
-        if (s->data_remaining == 0) {
+        qemu_log_mask(LOG_TRACE,
+                      "mxs-ssp%d: dma read done n=%u from_fifo=%u "
+                      "first=%02x%02x%02x%02x fifo_level=%u\n", s->id, n,
+                      from_fifo, buf[0], buf[1], buf[2], buf[3], s->fifo_level);
+        if (s->data_remaining == 0 && s->fifo_level == 0) {
+            s->status &= ~STATUS_DATA_BUSY;
+        } else if (s->data_remaining == 0) {
             s->status &= ~STATUS_DATA_BUSY;
         }
     }

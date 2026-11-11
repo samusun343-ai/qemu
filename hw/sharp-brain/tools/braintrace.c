@@ -27,6 +27,8 @@ static int nranges = 0;
 static uint64_t regvas[24];
 static int nregvas = 0;
 static int dumpmem = 0;
+static uint64_t dumpvas[24];
+static int ndumpvas = 0;
 static uint64_t nevents;
 static uint64_t maxevents = 40000000;
 static GMutex lock;
@@ -122,6 +124,11 @@ static void vcpu_tb_exec_regs(unsigned int cpu_index, void *udata)
             g_byte_array_unref(sg);
         }
         if (r8) { dump_mem(s, "r8buf", r8, 0x40); }
+        for (int k = 0; k < ndumpvas; k++) {
+            char lb[16];
+            snprintf(lb, sizeof(lb), "v%d", k);
+            dump_mem(s, lb, dumpvas[k], 0x40);
+        }
     }
     g_mutex_lock(&lock);
     fprintf(out, "R %08" PRIx64 " %s\n", pc, s->str);
@@ -224,6 +231,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
             if (idx >= 0 && idx < 4) {
                 rhi[idx] = strtoull(tokens[1], NULL, 0);
                 if (idx >= nranges) { nranges = idx + 1; }
+            }
+        } else if (g_strcmp0(tokens[0], "dumpvas") == 0) {
+            g_auto(GStrv) items = g_strsplit(tokens[1], ",", 24);
+            for (gint k = 0; items[k]; k++) {
+                if (ndumpvas < 24) {
+                    dumpvas[ndumpvas++] = strtoull(items[k], NULL, 0);
+                }
             }
         } else if (g_strcmp0(tokens[0], "maxevents") == 0) {
             maxevents = strtoull(tokens[1], NULL, 0);
