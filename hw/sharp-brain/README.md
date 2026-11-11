@@ -160,6 +160,37 @@ plain PC keys map 1:1; Brain-specific keys that have no PC equivalent
 英和, marker, jump...) are reached through key combinations
 (see `brain-kbd.c` for the exact table).
 
+Complete host-key table (brain-kbd.c, layout "pw-sh6"):
+
+| host key(s) | contact | note |
+|---|---|---|
+| A..Z (QWERTY letters) | direct 1:1 | the 26 matrix letter keys |
+| Space, Enter/KpEnter, Backspace | direct | |
+| Up/Down/Left/Right | direct | the 4-way cursor pad |
+| Left/Right Shift | direct | Shift |
+| Esc / Home | row3 col6 | Brain Home key |
+| PageUp / PageDown | direct | |
+| Insert | row1 col2 | alias for History |
+| Minus / KpMinus | direct | |
+| 1..0, Kp0..Kp9 | symbols layer | 記号 + Q/W/E/R/T/Y/U/I/O/P (blue legends) |
+| ` = ~ [ ] \ ; ' , . / | symbols layer | 記号 + base key |
+| Ctrl+B | row0 col3 | 戻る (back) |
+| Ctrl+H | row1 col2 | 履歴 History |
+| Ctrl+D | row3 col2 | マイ辞書 (my dictionary) |
+| Ctrl+L | row5 col2 | 一覧 (list) |
+| Ctrl+K | row5 col6 | 国語 (Japanese dictionary) |
+| Ctrl+J | row6 col6 | 英和 (English-Japanese dictionary) |
+| Ctrl+V | row6 col4 | 音声 (voice) |
+| Ctrl+S | row2 col4 | hold 記号 (symbols modifier) |
+| Ctrl+M | row5 col2 + symbols | マーカー (marker) |
+| Ctrl+F | row3 col6 + symbols | 検索 (search) |
+
+Everything on the physical PW-SH6 keyboard is reachable this way:
+the matrix (from the linux-brain device tree) contains only letters,
+Space/Enter/Backspace/Shift/Minus, the cursor pad, Home, PageUp/Down,
+History, マイ辞書, 一覧, 国語, 英和, 音声, 記号 and the two
+blue-legend derivatives マーカー/検索.
+
 ## WinCE suspend/resume (works end to end)
 
 The power manager's auto-suspend cycle runs the complete real-firmware
@@ -288,17 +319,67 @@ card reads low) and GPIO0_0, and the enumerating driver prints
 
 ## Other known gaps
 
-* `InitRTC: NO RTC Present!` (EBOOT and kernel).  rtc.c models the
-  stmp3xxx block; the presence probe still answers in a way EBOOT
-  reads as "absent".  One register-level pass on the probe answers
-  is left to do.
-* `touchkey_point_calibration() FAILED!` (touchkey.cpp:223).  The
-  TouchKey driver still loads (DdsiTouchPanelAttach,
-  PenupDelayThreadProc) but the boot-time calibration aborts before
-  any LRADC CH2/CH3 conversion is issued - the failure happens
-  earlier than the panel sampling (likely a panel-present probe).
-  The LRADC model itself now flips the CH register TOGGLE bit per
-  conversion and returns real values for the non-touch channels.
+* `touchkey_point_calibration() FAILED!` (touchkey.cpp:223).  The full
+  dependency chain has been mapped (2026-11 disassembly + runtime
+  watchpoints, see "Touch bring-up analysis" below); the blocker is a
+  guest-side driver-ordering race around the VMCopy/PMI1 stack, not a
+  simple missing device.  The panel itself is a SEMTECH SX8650 I2C
+  touch controller on I2C1 (per `SRC\EDNA2\MainTouch\SX8650Touch.cpp`);
+  no I2C bus transactions are issued at all before the failure, so an
+  SX8650 I2C device model still needs to be added once the software
+  stack gets past the calibration gate.
+
+### Touch bring-up analysis (2026-11)
+
+Reverse-engineered call chain (module VAs from a pmemsave dump +
+page-table walk; scattered WinCE6 DLL pages make VA != PA):
+
+    touchkey.dll!touchkey_point_calibration (VA 0xC07C5288 in the dump)
+      bl 0xC07C2548 -> 0xC07C23AC wrapper -> "get calibration data"
+        CreateFileW("VMC1:")                      <- FAILS
+        DeviceIoControl(0x80002093, 16-byte struct)
+        requires shorts [0],[2],[6],[8] != 0, then magic [0xc]/[0xe]
+      -> prints "ERROR: touchkey.cpp line 223: ..."
+
+  VMC1: is provided by VMCopy.dll (registry
+  `Drivers\BuiltIn\VMCopy`, Prefix VMC); its sub2.c:587
+  `CreateFileW("PMI1:", GENERIC_READ|GENERIC_WRITE, 3, ...)`
+  fails.
+
+  PMI1: is provided by pmupdk.dll (registry `Drivers\BuiltIn\PMI`,
+  Prefix PMI); it IS registered eventually (present in the
+  Drivers\Active hive), but the VMCopy sub2 init runs from
+  pmupdk's `PowerInitHandle` worker thread which executes BEFORE
+  `PMI_Init` returns - i.e. before device.exe registers PMI1:.
+
+Observed in the UART log:
+
+    PowerInitHandle() ID = 01990006
+    PowerInitHandle()++
+    ERROR: ...VMCopy\VMCopy\.\sub2.c line 587: Failed in createFile() for PMI1:
+    PowerInitHandle()--
+    PowerInit()--            <- PMI_Init still running when the thread ran
+
+Under TCG the guest completes far less work per scheduler tick than
+the real 454 MHz part, so the PowerInitHandle thread gets its quantum
+inside PMI_Init and the CreateFile loses the race deterministically
+(also with `-icount shift=1`).  Next steps for touch:
+
+  - reproduce the real-hardware boot order (compare against a serial
+    log captured on a real PW-AJ2/SH6 - the Brain Hackers community
+    has the hardware), or
+  - model the SX8650 on I2C1 and check whether the WinCE touch MDD
+    (`SX8650Touch.cpp`, `TPDriver`) can be driven directly, or
+  - inspect the pmupdk PowerInitHandle thread's creation priority and
+    delay requirements (pmupdk strings live at PA 0x40a80000+ in the
+    dump; module delta 0x7FB82000).
+
+Other facts established along the way: the WinCE image loads only the
+I2C1 bus driver (registry has `Drivers\BuiltIn\I2C1`, no I2C0 entry;
+`I2C_Init(1) : ClockRate=400kbps`), the audio codec is a BU26154
+(`wavedev2_BU26154.dll`), and a `touchraw.dll` (Prefix TRD) exists as
+a raw-touch helper driver.
+
 * Storage throughput under TCG is low (most request completions go
   through driver timeout paths; only a handful of SSP IRQ 96 pulses
   per boot).  Improving IRQ fidelity should speed the WinCE storage
