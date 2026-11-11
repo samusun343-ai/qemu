@@ -295,7 +295,13 @@ static void pinctrl_reset(DeviceState *dev)
 
     memset(s->mux, 0, sizeof(s->mux));
     memset(s->dout, 0, sizeof(s->dout));
-    memset(s->ext_input, 0, sizeof(s->ext_input));
+    /*
+     * ext_input[] is NOT cleared: it models levels driven from outside
+     * the SoC (board straps like the SH6 GPIO0_5 microSD-present line,
+     * the card-detect switch, matrix-keyboard rows).  Real pins keep
+     * their external level across a chip reset, and EBOOT re-reads the
+     * DIN0 strap after every (power-cycle) reset.
+     */
     memset(s->doe, 0, sizeof(s->doe));
     memset(s->pin2irq, 0, sizeof(s->pin2irq));
     memset(s->irqen, 0, sizeof(s->irqen));

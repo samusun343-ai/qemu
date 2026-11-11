@@ -53,6 +53,20 @@ static void brain_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_IMX28);
     qdev_realize(DEVICE(&s->soc), NULL, &error_fatal);
 
+    /*
+     * Board straps, read through PINCTRL DIN0 (EBOOT maps the PINCTRL
+     * block at VA 0xb0000000 and reads "capability bits" as DIN0 bits):
+     *
+     *   GPIO0_5 - "microSD slot populated".  EBOOT's early-init query
+     *             (edna2 ED-PARAM read at the CheckResumeInfo site)
+     *             gates the whole slot-1 path on it: 0x4006fe94(1)
+     *             refuses to open SSP1, g_bSDHCExist[1] stays 0 and
+     *             both EBOOT and the kernel report "NO SD card1".
+     *             The SH6 platform (PW-AJ1/AJ2/SH6) has the slot, so
+     *             the strap reads high.
+     */
+    mxs_pinctrl_set_input(s->soc.pinctrl, 0, 1u << 5, 1u << 5);
+
     /* DRAM at 0x40000000 */
     memory_region_add_subregion(get_system_memory(), IMX28_DRAM_BASE,
                                 machine->ram);

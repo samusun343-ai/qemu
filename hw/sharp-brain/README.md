@@ -242,35 +242,49 @@ boot - most completions go through driver timeout paths).  First boot
 to the dictionary menu therefore takes a long wall time.  Improving
 IRQ fidelity should recover most of it.
 
-## Known issue: microSD enumeration - mapped to one EBOOT gate word
+## microSD slot (RESOLVED)
 
-The whole slot-1 path (EBOOT's `g_bSDHCExist[1]` and the kernel-side
-BSPSDHCIsCardPresent) is gated by a single word in EBOOT's global
-work (PA 0x4003e980 + 0):
+Slot 1 (SSP1) enumerates end to end once the board strap is modelled:
 
-* EBOOT SDMMC_Init (0x400789c0 in the dump) loops the two slots.  Per
-  slot it calls the probe 0x40071854, which opens the slot's SSP
-  through the DKA (0x4006aa00, SSP1 base 0x80012000), runs the
-  CLKGATE handshake on the DKA register cache, programs CTRL1
-  (0x15506273) plus the clock config, and returns 1.
-* The probe first calls 0x4006fe94(slot).  For slot 1 that function
-  needs the word at EBOOT work+0 (0x4003e980) to be non-zero (slot
-  0's call sets the flag at 0x4003d5a8 and that word).  In the
-  emulator the word stays 0 - verified with a braintrace register
-  dump at the slot-1 dispatch (work reads {0, 1, 0, ...}) - so
-  slot 1 is skipped silently and g_bSDHCExist[1] stays 0.
-* The kernel's BSPSDHCIsCardPresent() then reports "NO SD card1"
-  from the EBOOT table and the slot never reaches SSP1.
+    WARNING: SDMMC_Init: g_bSDHCExist[0]=1 g_bSDHCExist[1]=1
+    BSPSDHCIsCardPresent(): The SD card1 is present.
+    [FST]HandleAddDevice: ... CSDDevice::SDLoadDevice() Device_SD_Memory (2)
 
-The bus wiring itself is complete: SSP1 carries an sd-bus with the
-index=1 drive, and the card-detect level is modelled on LRADC
-channel 5 (a present card reads low; eMMC channel 4 is always low).
+Root cause (the old "EBOOT gate word" analysis, corrected): the EBOOT
+"ED-PARAM" query (0x400800b0, arg 5) does not read a DRAM config struct
+at all.  EBOOT maps the PINCTRL block as a 1 MB section at VA
+0xb0000000 (L1 entry at PA 0x400b0000 + 0x2c00: 0x80000402), and
+*(0x8003d4bc) is simply PINCTRL's VA 0xb0018000 - the query reads
+HW_PINCTRL_DIN0 (VA 0xb0018900) and returns bit 5, i.e. the **GPIO0_5
+input level**.  That pin is the SH6 board strap for "microSD slot
+populated":
 
-Next step: find the writer of PA 0x4003e980 (a watchpoint on the
-EBOOT-phase word, or static work on the chain sub-calls: 0x4007910c
-builds a DKA request through 0x40070eec with a 10-tick timeout check
-at 0x40079170..0x4007917c; 0x40078e5c runs the post-probe chain).
-The kernel-side sdhc.dll slot-1 init is otherwise ready.
+* early EBOOT init (right after the `Not Resume !!!` print) latches
+  the strap into the flag at VA 0x8003d5a8 (`strne r3, [r5]` after
+  `bl 0x400800b0(5)` at 0x4006dbc4);
+* `0x4006fe94(1)` (called first by the slot probe 0x40071854) gates
+  slot 1 on that flag;
+* slot 0's call unconditionally writes the work word at VA 0x8003e980
+  (the earlier red herring) and returns 1.
+
+In the emulator GPIO0_5 read 0, so EBOOT skipped slot 1 silently and
+the kernel's BSPSDHCIsCardPresent() reported "NO SD card1" from the
+EBOOT-args table.
+
+Two changes fix it (brain.c / pinctrl.c):
+
+1. the machine drives GPIO0_5 high as a board strap
+   (`mxs_pinctrl_set_input(pinctrl, 0, 1 << 5, 1 << 5)`);
+2. PINCTRL reset no longer clears `ext_input[]` - external pin levels
+   (straps, card-detect, keyboard rows) survive chip resets like they
+   do on real hardware, so the strap is still valid after the initial
+   machine reset and through the suspend/resume power-cycle.
+
+The bus wiring was already complete: SSP1 carries the sd-bus with the
+index=1 drive, card-detect is modelled on LRADC channel 5 (a present
+card reads low) and GPIO0_0, and the enumerating driver prints
+`SDHCSlotOptionHandler - SDHCDSetSlotInterfaceEx : Clock Setting:
+52000000` as it switches the slot to 8-bit high-speed timing.
 
 ## Other known gaps
 
