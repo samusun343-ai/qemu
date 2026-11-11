@@ -52,6 +52,17 @@
 
 #define BM_RTC_PERSISTENT0_AUTO_RESTART   (1u << 17)
 
+/*
+ * HW_RTC_STAT read-only capability bits (checked by EBOOT InitRTC and
+ * the kernel OAL):
+ *   bit 31 RTC_PRESENT   - "ERROR: InitRTC: NO RTC Present!" if 0
+ *   bit 30 ALARM_PRESENT - "ERROR: InitRTC: NO ALARM Present!" if 0
+ * The writable handshake bits (STALE/NEW_REGS, 0xff0000) stay clear so
+ * the post-reset poll loops complete immediately.
+ */
+#define BM_RTC_STAT_RTC_PRESENT    (1u << 31)
+#define BM_RTC_STAT_ALARM_PRESENT  (1u << 30)
+
 /* epoch the seconds counter starts from: 2012-05-07 (kernel build) */
 #define RTC_DEFAULT_EPOCH_SECONDS  1336348800ULL
 
@@ -107,7 +118,7 @@ static uint64_t rtc_read(void *opaque, hwaddr addr, unsigned size)
     case HW_RTC_CTRL:
         return s->ctrl;
     case HW_RTC_STAT:
-        return s->stat;
+        return s->stat | BM_RTC_STAT_RTC_PRESENT | BM_RTC_STAT_ALARM_PRESENT;
     case HW_RTC_MILLISECONDS:
         return rtc_milliseconds(s);
     case HW_RTC_SECONDS:
