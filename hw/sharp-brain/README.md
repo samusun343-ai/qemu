@@ -206,83 +206,41 @@ The EBOOT splash screen renders on the LCDIF console during boot; the
 kernel's display driver scans out the framebuffer at PA 0x40100000
 continuously.
 
-## Known issue: the FAT volumes never mount (no shell/UI)
+## The FAT volume mount chain (RESOLVED)
 
-After all drivers load (including the GWES display/touch/keyboard
-DDIs) the system goes idle and the PM auto-suspends.  The dictionary
-launcher never starts: block-layer tracing shows the WinCE storage
-manager never reads the FAT16/FAT32 partitions at all (zero reads
-past the OS partition), so no volume mounts and no launcher EXE
-(WCEPRJ.EXE / the \SHARP startup folder on FAT32) can load.  The
-screen stays black because the framebuffer simply contains no UI.
-Tracking the mount chain (FSDMGR / the Sharp "FST" manager seen in
-`[FST]HandleAddDevice` logs) is the next milestone.
+After the APBH SEMA/PIO fixes the storage manager still stalled right
+after the partition BPB reads.  Root cause (found with the braintrace
+plugin + pmemsave analysis): every DMA-read sector lost its first 128
+bytes.  The PIO/kick sequence that arms a card command pre-pulls up to
+32 FIFO words (128 bytes) into the SSP RX FIFO for the CPU access
+path; the DMA data descriptor then has to deliver those words first.
+Without the FIFO drain the descriptor buffer started with a zeroed
+head, so the volume BPBs the exfat FSD validated were corrupt and the
+mount chain died silently after the probe reads.
 
-Update (Nov 2026): the mount chain has been traced end to end with the
-tools in tools/. The storage manager (FSDMGR + mspart, running in the
-driver host process) DOES knock on every DSK after registration: it
-queries geometry (ioctl 0x71C00/0x71C24), the profile name (0x71800,
-"NandDic") and then issues scatter reads (ioctl 0x75C08, 28-byte SG
-request {start, count, ..., buf, 0x200}). In the emulator those reads
-"complete" successfully but return an all-zero buffer and no SD command
-is ever issued: the request dies somewhere between edna2_SDMemory.dll
-(NDF device), sdbus2.dll (SD bus) and sdhc.dll (SHC host controller),
-so mspart sees a zero sector 0 (no MBR) and never mounts. The remaining
-work is finding where in that chain the request is dropped; module
-bases in the driver-host process are stable across boots (FSDMGR
-0xc0330000, mspart 0xc0360000, sdbus2 0xc0500000, sdhc 0xc0780000,
-edna2_SDMemory 0xc07d1000, block_readonly 0xc07e0000, block_writable
-0xc0800000/0xc0810000/0xc0820000, block_com 0xc0850000).
+With the drain in place (ssp.c) the whole stack delivers real sectors
+end to end, verified in the block-layer traces:
 
-Update (Nov 11 2026): full 6.6GB eMMC image reconstructed from the
-split release assets and re-verified - boot behaviour is identical, so
-the blocker is guest-driver-side, not an image artifact.  Boot
-timeline with per-10s SSP command counts (qemu-dbg.log, CMD* traces):
+* the FAT32 volume BPB (EB FE 90 / MSWIN4.1, totsec 0xac1740) reads back
+  byte-exact through the edna2/sdbus2/sdhc scatter-read path
+* the FSD walks the FAT area (reads at partition start + 0x20 with a
+  0x200-sector stride) and enumerates the root directory (LFN dir
+  entries for the Sharp content files visible in the SG buffers)
+* the FSD reads file data deep into the 5.5GB user volume (LBAs around
+  0xb37xxx), i.e. the volume is mounted and files are opened
 
-    t<10s    EBOOT: 242 SSP commands (NK read from the OS partition)
-    t=20s    [FST]HandleAddDevice + DSK_Init regions - 405 commands
-    t=20-190s  idle, NO new SSP activity (405 -> 409)
-    t>200s   PM suspend/resume cycles (409 -> 424, resume re-init)
+The full 6.6GB image (all five split release assets re-assembled with
+qemu-img resize to the real 8GiB card size) is required for the
+launcher: with a truncated image the deep file-data reads return
+zeros.  With the full image the Sharp boot UI starts drawing (the
+top strip of the launcher splash appears on the LCDIF console).
 
-So after the SD bus finishes enumerating the eMMC (CMD0/CMD8/CMD55/
-CMD1/CMD2/CMD3/CMD9/CMD7/CMD16 + eMMC CMD6 SWITCH to 8-bit @52MHz,
-all with correct responses and SSP IRQ 96 pulses), FSDMGR's scatter
-reads still never reach the SSP.  The previously observed CMD17/18
-traffic in the debug log is all bootloader/kernel image loading, not
-the mount path.  Next step: disassemble the sdhc.dll/sdbus2.dll
-scatter-read path from the nk.nb0 (XIP at PA 0x40200000 in the RAM
-dump) and find the divergence.
-
-Breakthrough (Nov 11 2026, later): the mount chain now reads REAL
-sectors.  Three APBH/SSP divergences were fixed (see the hw/sharp-brain
-commits): APBH SEMA is released through the SET register (+0x34) by the
-Freescale CSP/DKA and polled back through PHORE; DMA data descriptors
-carry PIO words that must be written into the SSP first (their CTRL0
-word with RUN|DATA_XFER starts the SD command and arms the data phase);
-CTRL0.RUN auto-clears on completion.  After the fixes the WinCE storage
-manager walks the whole edna2_SDMemory -> SDBus -> SDHC -> APBH -> SSP
-chain and mspart/FSDMGR issue CMD17s to the DSK_Init region sectors
-(0x27800, 0x47800, 0x9200f = the FAT16 BPB, 0x18c809 = the FAT32 BPB)
-and get real data back.
-
-The mount still stops right after the partition BPB reads (no FAT-area
-reads, screen stays black).  Facts established from the OS image for
-the next round:
-
-* the FAT FSD is `exfat.dll` (the unified WinCE6 FSD) - there is no
-  fatfsd/tfat.dll in the ROM; the registry sets
-  DefaultFileSystem=EXFAT / Dll=exfat.dll
-* the DSK stack: edna2_SDMemory.dll (eMMC, "NandDic" profile) and
-  edna2_UserSDMemory.dll (the microSD/user DSK), with RoFilter.dll,
-  cachefilt.dll, diskcache.dll and the BLOCK_* drivers as filters
-* the FAT16/FAT32 partition BPBs are valid (MSWIN4.1, 512B sectors);
-  the 8GiB card is sector-addressed and both EBOOT (which reads the NK
-  image out of a file on the FAT16 volume) and the WinCE drivers use
-  LBA arguments consistently
-
-Next milestone: find where the exfat FSD attach aborts after the BPB
-read (volume-open validation, filter stack load order, or a geometry
-ioctl answer).
+Emulation speed is the remaining practical issue: the WinCE storage
+stack completes requests at roughly 10-30/s under TCG (the guest
+driver waits tens of ms per request; only 3 SSP IRQ 96 pulses per
+boot - most completions go through driver timeout paths).  First boot
+to the dictionary menu therefore takes a long wall time.  Improving
+IRQ fidelity should recover most of it.
 
 ## Known issue: microSD enumeration stops before the bus
 
@@ -294,6 +252,22 @@ still exits "NO SD card1" before any SD command reaches SSP1 -
 one of its early setup sub-calls fails in the emulator.  The slot
 wiring itself (SSP1 sd-bus + CD level) is in place; following the
 chain call by call is the remaining work for microSD support.
+
+## Other known gaps
+
+* `InitRTC: NO RTC Present!` - EBOOT and the kernel do not find the
+  RTC (rtc.c models the stmp3xxx block; the presence probe fails).
+  The system clock falls back to defaults; fixing the probe answer
+  is cosmetic-grade work.
+* `touchkey_point_calibration() FAILED!` - the EDNA2 TouchKey driver's
+  boot-time calibration aborts; the touch driver still loads
+  (DdsiTouchPanelAttach, PenupDelayThreadProc).  The LRADC touch
+  model answers the conversion sequence but something in the
+  calibration sampling diverges.
+* EBOOT's `LoadBootCFG: failed to load configuration` /
+  `ResetDefaultBootCFG: failed to store configuration to flash` -
+  EBOOT has no flash to store its config (no GPMI/NAND model); it
+  falls back to compiled-in defaults, which match the dump.
 
 ## References
 
