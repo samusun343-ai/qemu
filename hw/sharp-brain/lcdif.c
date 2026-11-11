@@ -479,11 +479,18 @@ static bool lcdif_gfx_update(void *opaque)
         for (int x = 0; x < w; x++) {
             int nx, ny;
             if (transposed) {
+                /*
+                 * Landscape display (x: 0..853, y: 0..479) from the
+                 * portrait GRAM (nx: 0..479, ny: 0..853).  The panel
+                 * Y coordinate spans the native HEIGHT (854), not
+                 * the WIDTH: using the width here mapped every
+                 * display column x >= 480 to GRAM row 0, so only
+                 * 230400 of the 409920 GRAM pixels were ever
+                 * visible and the right ~44% of the screen repeated
+                 * a single row.
+                 */
                 nx = y;
-                ny = ILI9805_NATIVE_WIDTH - 1 - x;
-                if (ny < 0) {
-                    ny = 0;
-                }
+                ny = ILI9805_NATIVE_HEIGHT - 1 - x;
             } else {
                 nx = x;
                 ny = y;

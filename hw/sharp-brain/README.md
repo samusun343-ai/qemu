@@ -333,6 +333,25 @@ card reads low) and GPIO0_0, and the enumerating driver prints
 `SDHCSlotOptionHandler - SDHCDSetSlotInterfaceEx : Clock Setting:
 52000000` as it switches the slot to 8-bit high-speed timing.
 
+## Display (LCDIF) - transpose fix (2026-11-12)
+
+`lcdif_gfx_update()` mapped the landscape console from the portrait
+GRAM with `ny = ILI9805_NATIVE_WIDTH - 1 - x`.  The panel-Y coordinate
+spans the native *height* (854), so every display column x >= 480
+clamped to GRAM row 0: only 230400 of the 409920 GRAM pixels were ever
+visible and the right ~44% of the screen repeated a single row (the
+"top strip only" symptom).  Fixed to `ILI9805_NATIVE_HEIGHT - 1 - x`;
+the mapping is now a bijection over the whole frame.  Verified by
+enumerating the mapping (old: 230400 distinct pixels, new: 409920);
+a full boot check against the eMMC image is still pending.
+
+Open question, not changed yet: a frame pushed through APBH DMA
+channel 13 (`mxs_lcdif_dma_data`) never raises the LCDIF
+CUR_FRAME_DONE/VSYNC IRQ or swaps CUR/NEXT_BUF - only the CPU/master
+paths call `lcdif_transfer_done()`.  The WinCE display driver
+completes frames on the APBH channel IRQ (86) today, so this may be
+fine as-is; revisit with a trace once the eMMC boot test runs.
+
 ## Other known gaps
 
 * `touchkey_point_calibration() FAILED!` (touchkey.cpp:223).  The full
