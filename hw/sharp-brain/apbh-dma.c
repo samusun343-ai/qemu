@@ -11,11 +11,11 @@
  * descriptor chains ("CCW"s) located in guest memory:
  *
  *   struct ccw {
- *       u32 next;          // next descriptor address, 0 = stop
- *       u16 bits;          // COMMAND/CHAIN/IRQ/... flags
- *       u16 xfer_bytes;    // data byte count
- *       u32 bufaddr;       // data buffer address
- *       u32 pio_words[16]; // up to 16 PIO words
+ *       u32 next;            next descriptor address, 0 = stop
+ *       u16 bits;            COMMAND/CHAIN/IRQ/... flags
+ *       u16 xfer_bytes;      data byte count
+ *       u32 bufaddr;         data buffer address
+ *       u32 pio_words[16];   up to 16 PIO words
  *   };
  *
  * bits:
@@ -188,6 +188,10 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
             }
             break;
         case 1: /* WRITE: peripheral -> memory */
+        case 2: /* READ: memory -> peripheral */
+        {
+            bool to_device = (CCW_COMMAND(bits) == 2);
+
             if (ssp) {
                 /*
                  * A data descriptor can carry PIO words: the hardware
@@ -202,46 +206,24 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                     mxs_ssp_dma_pio(ssp, i, pio[i]);
                 }
                 mxs_ssp_dma_pio(ssp, -1, 0);
-                mxs_ssp_dma_data(ssp, false, bufaddr, xfer);
+                mxs_ssp_dma_data(ssp, to_device, bufaddr, xfer);
             } else if (gpmi) {
                 for (unsigned i = 0; i < pio_num; i++) {
                     mxs_gpmi_dma_pio(gpmi, i, pio[i]);
                 }
                 mxs_gpmi_dma_pio(gpmi, -1, 0);
-                mxs_gpmi_dma_data(gpmi, false, bufaddr, xfer);
+                mxs_gpmi_dma_data(gpmi, to_device, bufaddr, xfer);
             } else if (i2c) {
-                mxs_i2c_dma_data(i2c, false, bufaddr, xfer);
+                mxs_i2c_dma_data(i2c, to_device, bufaddr, xfer);
             } else if (!s->is_apbx && ch == 13 && s->lcdif) {
-                mxs_lcdif_dma_data(s->lcdif, false, bufaddr, xfer);
+                mxs_lcdif_dma_data(s->lcdif, to_device, bufaddr, xfer);
             } else {
                 qemu_log_mask(LOG_UNIMP,
-                              "mxs-dma: WRITE on clientless channel %d\n",
-                              ch);
+                              "mxs-dma: %s on clientless channel %d\n",
+                              to_device ? "READ" : "WRITE", ch);
             }
             break;
-        case 2: /* READ: memory -> peripheral */
-            if (ssp) {
-                for (unsigned i = 0; i < pio_num; i++) {
-                    mxs_ssp_dma_pio(ssp, i, pio[i]);
-                }
-                mxs_ssp_dma_pio(ssp, -1, 0);
-                mxs_ssp_dma_data(ssp, true, bufaddr, xfer);
-            } else if (gpmi) {
-                for (unsigned i = 0; i < pio_num; i++) {
-                    mxs_gpmi_dma_pio(gpmi, i, pio[i]);
-                }
-                mxs_gpmi_dma_pio(gpmi, -1, 0);
-                mxs_gpmi_dma_data(gpmi, true, bufaddr, xfer);
-            } else if (i2c) {
-                mxs_i2c_dma_data(i2c, true, bufaddr, xfer);
-            } else if (!s->is_apbx && ch == 13 && s->lcdif) {
-                mxs_lcdif_dma_data(s->lcdif, true, bufaddr, xfer);
-            } else {
-                qemu_log_mask(LOG_UNIMP,
-                              "mxs-dma: READ on clientless channel %d\n",
-                              ch);
-            }
-            break;
+        }
         default:
             break;
         }
@@ -291,8 +273,8 @@ static uint64_t mxs_dma_read(void *opaque, hwaddr addr, unsigned size)
 
     if (addr >= DMA_REG_NXTCMDAR(0) &&
         addr < DMA_REG_NXTCMDAR(MXS_DMA_CHANNELS)) {
-        int ch = (addr - 0x110) / 0x70;
-        uint32_t off = (addr - 0x110) % 0x70;
+        int ch = (addr - DMA_REG_NXTCMDAR(0)) / 0x70;
+        uint32_t off = (addr - DMA_REG_NXTCMDAR(0)) % 0x70;
         switch (off) {
         case 0x00:
             return s->nxctmdar[ch];
@@ -387,8 +369,8 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
 
     if (addr >= DMA_REG_NXTCMDAR(0) &&
         addr < DMA_REG_NXTCMDAR(MXS_DMA_CHANNELS)) {
-        int ch = (addr - 0x110) / 0x70;
-        off = (addr - 0x110) % 0x70;
+        int ch = (addr - DMA_REG_NXTCMDAR(0)) / 0x70;
+        off = (addr - DMA_REG_NXTCMDAR(0)) % 0x70;
         qemu_log_mask(LOG_TRACE,
                       "mxs-dma: ch%d write off 0x%02x = 0x%08x\n",
                       ch, off, (uint32_t)value);
