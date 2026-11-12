@@ -139,6 +139,38 @@ void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,
     pinctrl_update_irq(s, bank);
 }
 
+/*
+ * Re-arm the Brain keyboard column IRQs.
+ *
+ * The EDNA2 KBD driver's ISR tears down its column IRQs after the
+ * first keypress (IRQEN CLR per column, then PIN2IRQ/IRQLEV/IRQPOL)
+ * and its IST -- which would normally re-arm them -- never runs
+ * in QEMU (the shell/GWES activation gap, Issue B).  The model
+ * restores the columns to their initialized state so a later key
+ * can fire IRQ 125 again: PIN2IRQ + IRQEN armed, level-sensitive,
+ * low level active.  Only the keyboard columns are touched
+ * (GPIO2_16..21 = 0x3f0000, GPIO4_8 = 0x100).  Safe to call when no
+ * key is pressed (columns high: no IRQ fires) and when a key is
+ * held (column low: the IRQ fires, delivering the keypress).
+ */
+void mxs_pinctrl_rearm_kbd_irq(DeviceState *dev)
+{
+    MxsPinctrlState *s = MXS_PINCTRL(dev);
+
+    /* bank 2: columns 0..5 = GPIO2_16..21 */
+    s->pin2irq[2] |= 0x3f0000u;
+    s->irqen[2]   |= 0x3f0000u;
+    s->irqlev[2]  |= 0x3f0000u;
+    s->irqpol[2]  &= ~0x3f0000u;
+    /* bank 4: column 6 = GPIO4_8 */
+    s->pin2irq[4] |= 0x100u;
+    s->irqen[4]   |= 0x100u;
+    s->irqlev[4]  |= 0x100u;
+    s->irqpol[4]  &= ~0x100u;
+    pinctrl_update_irq(s, 2);
+    pinctrl_update_irq(s, 4);
+}
+
 /* public: register a GPIO output observer (matrix keyboard) */
 void mxs_pinctrl_set_output_hook(DeviceState *dev, MxsGpioOutNotify fn,
                                   void *opaque)

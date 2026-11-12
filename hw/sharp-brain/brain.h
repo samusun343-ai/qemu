@@ -383,6 +383,10 @@ struct MxsLradcState {
 void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,
                            uint32_t value);
 
+/* public: re-arm the Brain keyboard column IRQs after the guest
+ * KBD driver tears them down (see pinctrl.c). */
+void mxs_pinctrl_rearm_kbd_irq(DeviceState *dev);
+
 /*
  * Public: observe GPIO output changes.
  *

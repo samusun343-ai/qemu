@@ -266,6 +266,14 @@ static void brain_kbd_recalc(BrainKbdState *s)
 
     mxs_pinctrl_set_input(s->pinctrl, 2, 0x3f0000, cols2);
     mxs_pinctrl_set_input(s->pinctrl, 4, 0x100, cols4);
+    /*
+     * Re-arm the column IRQs: the guest KBD driver tears them down
+     * after its first keypress and its IST never runs to re-arm
+     * them, so without this the keyboard goes deaf after one key.
+     * Safe when idle (columns high: no spurious IRQ) and when a key
+     * is held (column low: the IRQ fires, delivering the keypress).
+     */
+    mxs_pinctrl_rearm_kbd_irq(s->pinctrl);
 }
 
 /* pinctrl output hook: the guest re-drove one of the GPIO banks */
