@@ -63,8 +63,15 @@
 #define BM_RTC_STAT_RTC_PRESENT    (1u << 31)
 #define BM_RTC_STAT_ALARM_PRESENT  (1u << 30)
 
-/* epoch the seconds counter starts from: 2012-05-07 (kernel build) */
-#define RTC_DEFAULT_EPOCH_SECONDS  1336348800ULL
+/* The seconds counter starts from 0 (unset): a real i.MX28 RTC with no
+ * battery backup reads 0 at power-on, and the WinCE RTC driver treats
+ * that as "date/time not set", returning its 2000-01-01 12:00 default
+ * so the guest shows the first-time date/time setup screen. A valid
+ * date here (e.g. the 2012-05-07 kernel-build date) makes the guest
+ * skip setup and land straight in the home, whose activation is then
+ * blocked (Issue B) with no setup flow to drive it. The uploaded
+ * qemu-brain build (boottest81) returns unset and shows setup. */
+#define RTC_DEFAULT_EPOCH_SECONDS  0ULL
 
 OBJECT_DECLARE_SIMPLE_TYPE(MxsRtcState, MXS_RTC)
 
