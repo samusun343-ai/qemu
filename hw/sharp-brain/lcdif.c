@@ -18,6 +18,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "hw/core/irq.h"
@@ -229,6 +230,24 @@ static void lcdif_update_irq(MxsLcdifPriv *s)
     bool vsync = (s->ctrl1 & BM_CTRL1_VSYNC_EDGE_IRQ) &&
                  (s->ctrl1 & BM_CTRL1_VSYNC_EDGE_IRQ_EN);
     qemu_set_irq(s->irq, done || vsync);
+}
+
+/* Periodic VSYNC edge: the panel refreshes at ~60 Hz and the LCDIF
+ * raises a VSYNC edge each frame.  The guest display driver clears
+ * the VSYNC status bit (CTRL1 CLR alias) and waits for the next edge
+ * before pushing a frame, so a VSYNC that only fires on transfer
+ * completion deadlocks the driver after the initial pushes.  Re-arm
+ * every 16.667 ms (QEMU_CLOCK_VIRTUAL: follows guest virtual time). */
+#define LCDIF_VSYNC_PERIOD_NS (16666667ULL)
+static void lcdif_vsync_tick(void *opaque)
+{
+    MxsLcdifPriv *s = opaque;
+
+    s->ctrl1 |= BM_CTRL1_VSYNC_EDGE_IRQ;
+    lcdif_update_irq(s);
+    timer_mod(s->vsync_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  LCDIF_VSYNC_PERIOD_NS);
 }
 
 /* a CPU/DMA transfer sequence completed */
@@ -646,6 +665,12 @@ static void lcdif_realize(DeviceState *dev, Error **errp)
     }
     s->con = qemu_graphic_console_create(dev, 0, &lcdif_gfx_ops, s);
     qemu_console_resize(s->con, s->width, s->height);
+
+    /* start the periodic VSYNC (panel refresh) */
+    s->vsync_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, lcdif_vsync_tick, s);
+    timer_mod(s->vsync_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  LCDIF_VSYNC_PERIOD_NS);
 }
 
 static const Property lcdif_properties[] = {

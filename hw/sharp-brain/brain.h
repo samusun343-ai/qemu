@@ -242,6 +242,14 @@ struct MxsLcdifPriv {
     /* console geometry (landscape view) */
     uint32_t width, height;
 
+    /* periodic VSYNC (panel refresh): the real LCDIF raises a VSYNC
+     * edge each frame (panel timing), and the guest display driver
+     * waits for it before pushing the next frame.  Without a periodic
+     * VSYNC the driver stalls after the initial pushes (it clears the
+     * VSYNC bit and waits for a new edge that only a transfer
+     * completion would set). */
+    QEMUTimer *vsync_timer;
+
     /* debug: remaining DATA writes to log after a RAMWR */
     int dbg_data_log;
 };
