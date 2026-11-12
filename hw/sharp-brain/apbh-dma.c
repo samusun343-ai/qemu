@@ -131,6 +131,8 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
         uint32_t next, bits, xfer, bufaddr;
         uint32_t pio[16] = { 0 };
         MxsSspState *ssp = (!s->is_apbx && ch < 4) ? s->ssp[ch] : NULL;
+        MxsGpmiState *gpmi = (!s->is_apbx && ch >= 4 && ch <= 11)
+                                 ? s->gpmi : NULL;
         MxsI2cState *i2c = NULL;
 
         /*
@@ -168,6 +170,13 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                 /* the peripheral command is implicitly started after
                  * the PIO word sequence (hardware behaviour) */
                 mxs_ssp_dma_pio(ssp, -1, 0);
+            } else if (gpmi) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_gpmi_dma_pio(gpmi, i, pio[i]);
+                }
+                /* the GPMI command is implicitly started after the
+                 * PIO word sequence (hardware behaviour) */
+                mxs_gpmi_dma_pio(gpmi, -1, 0);
             } else if (i2c) {
                 for (unsigned i = 0; i < pio_num; i++) {
                     mxs_i2c_dma_pio(i2c, i, pio[i]);
@@ -194,6 +203,12 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                 }
                 mxs_ssp_dma_pio(ssp, -1, 0);
                 mxs_ssp_dma_data(ssp, false, bufaddr, xfer);
+            } else if (gpmi) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_gpmi_dma_pio(gpmi, i, pio[i]);
+                }
+                mxs_gpmi_dma_pio(gpmi, -1, 0);
+                mxs_gpmi_dma_data(gpmi, false, bufaddr, xfer);
             } else if (i2c) {
                 mxs_i2c_dma_data(i2c, false, bufaddr, xfer);
             } else if (!s->is_apbx && ch == 13 && s->lcdif) {
@@ -211,6 +226,12 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                 }
                 mxs_ssp_dma_pio(ssp, -1, 0);
                 mxs_ssp_dma_data(ssp, true, bufaddr, xfer);
+            } else if (gpmi) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_gpmi_dma_pio(gpmi, i, pio[i]);
+                }
+                mxs_gpmi_dma_pio(gpmi, -1, 0);
+                mxs_gpmi_dma_data(gpmi, true, bufaddr, xfer);
             } else if (i2c) {
                 mxs_i2c_dma_data(i2c, true, bufaddr, xfer);
             } else if (!s->is_apbx && ch == 13 && s->lcdif) {

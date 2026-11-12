@@ -45,6 +45,10 @@
 #define IMX28_DUART_BASE       0x80074000
 #define IMX28_EMI_BASE         0x800e0000
 #define IMX28_OCOTP_BASE       0x8002c000
+#define IMX28_GPMI_BASE        0x8000c000
+#define IMX28_BCH_BASE         0x8000a000
+#define IMX28_IRQ_GPMI         88
+#define IMX28_IRQ_BCH          41
 
 /* IRQ numbers (i.MX28 ICOLL, from linux-brain imx28.dtsi) */
 #define IMX28_IRQ_GPIO0        127
@@ -97,6 +101,7 @@ struct Imx28State {
 
     DeviceState *ssp[4];        /* SSP0 = eMMC, SSP1 = microSD,
                                  * SSP2 = SPI sub-LCD / sub-MCU, SSP3 */
+    DeviceState *gpmi;          /* GPMI NAND controller + BCH ECC */
 
     DeviceState *digctl;
     DeviceState *clkctrl;
@@ -172,6 +177,7 @@ struct MxsDmaState {
 
     /* typed client pointers (same directory, shared header) */
     struct MxsSspState *ssp[4];         /* APBH channels 0-3 */
+    struct MxsGpmiState *gpmi;          /* APBH channels 4-11 */
     struct MxsLcdifPriv *lcdif;         /* APBH channel 13 */
     struct MxsI2cState *i2c[2];         /* APBX channels 6-7 */
 };
@@ -206,6 +212,17 @@ struct MxsSspState {
 int mxs_ssp_dma_pio(MxsSspState *s, int word_idx, uint32_t value);
 int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
                      dma_addr_t bufaddr, uint32_t len);
+
+/* ------------------------------------------------------------------ */
+/* GPMI NAND controller + BCH ECC (hw/sharp-brain/gpmi.c)             */
+
+#define TYPE_MXS_GPMI "mxs-gpmi"
+OBJECT_DECLARE_SIMPLE_TYPE(MxsGpmiState, MXS_GPMI)
+
+/* called by the DMA engine (APBH channels 4-11 = GPMI0-7) */
+int mxs_gpmi_dma_pio(MxsGpmiState *s, int word_idx, uint32_t value);
+int mxs_gpmi_dma_data(MxsGpmiState *s, bool to_device,
+                      dma_addr_t bufaddr, uint32_t len);
 
 /* ------------------------------------------------------------------ */
 /* LCDIF (hw/sharp-brain/lcdif.c)                                     */

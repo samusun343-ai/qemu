@@ -80,8 +80,6 @@ static const struct {
 } imx28_unimplemented[] = {
     { "imx28-hsadc",    0x80002000, 0x2000 },
     { "imx28-perfmon",  0x80006000, 0x2000 },
-    { "imx28-bch",      0x8000a000, 0x2000 },
-    { "imx28-gpmi",     0x8000c000, 0x4000 },
     { "imx28-etm",      0x80022000, 0x2000 },
     { "imx28-axi-ahb0", 0x8002e000, 0x2000 },
     { "imx28-can0",     0x80032000, 0x2000 },
@@ -287,6 +285,23 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         imx28_icoll_connect(s, s->ssp[i], IMX28_IRQ_SSP0 + i);
     }
 
+    /* GPMI NAND controller (region 0) + BCH ECC (region 1).
+     * The GPMI device IRQ (output 0) is NOT connected here: on the
+     * real chip the GPMI device interrupt shares ICOLL 88 with the
+     * APBH DMA GPMI channels (4-11), and the APBH DMA already drives
+     * line 88 on descriptor completion (the completion signal the
+     * driver waits on).  Connecting a second source to the same
+     * ICOLL input would override it.  The BCH complete IRQ (output
+     * 1) has its own line, ICOLL 41. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->gpmi), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->gpmi), 0, IMX28_GPMI_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->gpmi), 1, IMX28_BCH_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->gpmi), 1,
+                       qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
+                                              IMX28_IRQ_BCH));
+
     /* DIGCTL / CLKCTRL / POWER / OCOTP / PINCTRL / TIMROT / EMI / RTC */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->rtc), errp) ||
         !sysbus_realize(SYS_BUS_DEVICE(s->digctl), errp) ||
@@ -408,7 +423,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                                     imx28_unimplemented[i].size);
     }
 
-    /* DMA <-> SSP/LCDIF/I2C wiring */
+    /* DMA <-> SSP/GPMI/LCDIF/I2C wiring */
     {
         MxsDmaState *dma = MXS_DMA(s->apbh_dma);
 
@@ -416,6 +431,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         dma->ssp[1] = MXS_SSP(s->ssp[1]);
         dma->ssp[2] = MXS_SSP(s->ssp[2]);
         dma->ssp[3] = MXS_SSP(s->ssp[3]);
+        dma->gpmi = MXS_GPMI(s->gpmi);
         dma->lcdif = MXS_LCDIF(s->lcdif);
     }
     {
@@ -449,6 +465,9 @@ static void imx28_init(Object *obj)
         object_property_add_child(obj, g_strdup_printf("ssp%d", i),
                                   OBJECT(s->ssp[i]));
     }
+
+    s->gpmi = qdev_new(TYPE_MXS_GPMI);
+    object_property_add_child(obj, "gpmi", OBJECT(s->gpmi));
 
     s->digctl = qdev_new(TYPE_MXS_DIGCTL);
     object_property_add_child(obj, "digctl", OBJECT(s->digctl));

@@ -5,6 +5,7 @@ system_ss.add(when: 'CONFIG_SHARP_BRAIN', if_true: files(
   'bootrom.c',
   'icoll.c',
   'apbh-dma.c',
+  'gpmi.c',
   'rtc.c',
   'ssp.c',
   'lradc.c',
