@@ -605,7 +605,7 @@ static const MemoryRegionOps lcdif_ops = {
  *   - the panel glass is 480x854 and is mounted rotated 90 degrees in
  *     the Brain case, so the panel's Y axis (854) is the device's
  *     horizontal axis;
- *   - with the firmware's MAC = MX|MY|MV (0xd0) the GRAM is written
+ *   - with the firmware's MAC = MX|MY|ML (0xd0) the GRAM is written
  *     mirrored on both native axes (panel_pixel);
  *   - the mounting rotation maps device (x, y) to GRAM (853-x, y),
  *     i.e. console(x, y) = GRAM[853-x][y]: the portrait GRAM rotates
