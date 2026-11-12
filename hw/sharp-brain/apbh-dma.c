@@ -96,8 +96,11 @@ static bool mxs_dma_read_desc(dma_addr_t addr,
         return false;
     }
     *next = le32_to_cpu(hdr.next);
-    *bits = le16_to_cpu(hdr.bits_xfer & 0xffff);
-    *xfer = le16_to_cpu(hdr.bits_xfer >> 16);
+    /* convert the packed bits/xfer word as a whole, then split it */
+    uint32_t bits_xfer = le32_to_cpu(hdr.bits_xfer);
+
+    *bits = bits_xfer & 0xffff;
+    *xfer = bits_xfer >> 16;
     *bufaddr = le32_to_cpu(hdr.bufaddr);
 
     unsigned n = CCW_PIO_NUM(*bits);
