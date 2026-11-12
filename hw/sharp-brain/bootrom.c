@@ -414,7 +414,7 @@ static void bootrom_park_cpu(void)
     cpu_reset(cs);
     cpu_set_pc(cs, BOOTROM_PARK_PC);
     /* a self-loop is at the IRAM top-8; write it */
-    uint32_t spin = 0xeafffffe;
+    uint32_t spin = cpu_to_le32(0xeafffffe);   /* b . */
     address_space_write(&address_space_memory, BOOTROM_PARK_PC,
                         MEMTXATTRS_UNSPECIFIED, &spin, 4);
 }
@@ -425,13 +425,13 @@ static bool bootrom_do_call(uint32_t ivt_addr)
     CPUState *cs = CPU(cpu);
     uint32_t ivt[8];
     uint32_t entry;
-    static const uint32_t trampoline[] = {
-        0xe59f0008,             /* ldr  r0, [pc, #8]   -> mailbox */
-        0xe3a01001,             /* mov  r1, #1 */
-        0xe5801000,             /* str  r1, [r0] */
-        0xeafffffe,             /* b    . */
-        BOOTROM_MAILBOX,        /* .word 0x8003c000 */
-    };
+    uint8_t trampoline[20];
+
+    stl_le_p(&trampoline[0], 0xe59f0008);   /* ldr  r0, [pc, #8] -> mailbox */
+    stl_le_p(&trampoline[4], 0xe3a01001);   /* mov  r1, #1 */
+    stl_le_p(&trampoline[8], 0xe5801000);   /* str  r1, [r0] */
+    stl_le_p(&trampoline[12], 0xeafffffe);  /* b    . */
+    stl_le_p(&trampoline[16], BOOTROM_MAILBOX);
 
     if (address_space_read(&address_space_memory, ivt_addr,
                            MEMTXATTRS_UNSPECIFIED, ivt, 32) != MEMTX_OK) {
@@ -668,13 +668,15 @@ static bool bootrom_run(void)
             break;
         case SB_CMD_FILL:
         {
+            uint32_t data_le = cpu_to_le32(data);
+
             qemu_log_mask(LOG_TRACE, "bootrom: +%06u FILL 0x%08x, %u bytes "
                           "with 0x%08x\n", pos, addr, count, data);
             uint32_t words = (count + 3) / 4;
             for (uint32_t i = 0; i < words; i++) {
                 address_space_write(&address_space_memory,
                                     addr + i * 4, MEMTXATTRS_UNSPECIFIED,
-                                    &data, 4);
+                                    &data_le, 4);
             }
             break;
         }
