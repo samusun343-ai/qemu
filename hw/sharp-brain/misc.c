@@ -199,16 +199,23 @@ static uint64_t mxs_misc_read(void *opaque, hwaddr addr, unsigned size)
 /*
  * PXP data path. The guest's display driver programs the PXP by writing
  * a register set to RAM and pointing HW_PXP_NEXT at it. The register set
- * (observed live via TEMP-DIAG, boottest163, 14 identical blits) is a
- * packed 32-bit-word struct:
+ * (observed live, boottest163, 14 identical blits; full dump in
+ * boottest204/run.log) is a packed 32-bit-word struct:
  *   [+0x000] CTRL (0x84147), [+0x004] OUT_BUF (dest PA),
  *   [+0x010] PS_BUF (source PA), [+0x028] PS_SCALE = 0x10001000 (1.0).
  * The driver copies the 800x480 landscape GDI surface to a 480x800
- * portrait combine buffer. The LCDIF console transform is
- * console(x,y) = GRAM[853-x][y], so for the console to show the surface
- * upright the combine buffer must hold combine[r][c] = surface(799-r, c)
- * (90 deg CCW). RGB565, source stride 1600, dest stride 960. The RECT
- * is ignored (a full-surface copy is always correct; the RECT only
+ * portrait combine buffer, which the guest's copy loop then reads with
+ * stride 1600 (hardcoded `add r4, #1600`) and writes to the fb with
+ * stride 960. So the combine must be written with stride 1600 and
+ * rotated 90 deg CW (combine[y][x] = surface(479-x, y)) — this is
+ * what the uploaded PXP model does, and it makes the fb an exact
+ * rotation of the surface (boottest205: fb = CW(surface), 384000/384000)
+ * and the console show the setup screen clean and upright. (CCW
+ * produces an upside-down console, boottest204; stride 960 makes the
+ * copy loop downscale 800->480, boottest200.) The register set carries
+ * no output-pitch field (set+0x08 is 0), so the stride is taken from
+ * the copy loop / uploaded model, not the register set. RGB565. The
+ * RECT is ignored (a full-surface copy is always correct; the RECT only
  * selects which tiles are dirty).
  */
 static bool pxp_read_guest(hwaddr buf, uint8_t *out, uint32_t len)
@@ -260,19 +267,35 @@ static void pxp_process(hwaddr next)
         return;
     }
     src = pxp_host_ptr(src_pa, 800 * 480 * 2);
-    dst = pxp_host_ptr(dst_pa, 480 * 800 * 2);
+    /* The guest's copy loop reads the combine with stride 1600 (hardcoded
+     * `add r4, #1600` in the driver) and writes the fb with stride 960.
+     * The uploaded PXP model writes the rotated output with stride 1600,
+     * so the copy loop reads it 1:1 and the fb is an exact rotation
+     * (boottest203: copyloop(src=0x42d92000) == final fb, 384000/384000).
+     * Writing with stride 960 (the dest's nominal stride) makes the copy
+     * loop downscale 800->480 (boottest200: fb 238,951 px, garbled).
+     * So the dest stride here must be 1600, matching the copy loop's
+     * read stride and the uploaded model. The dest region is therefore
+     * 800 rows x 1600 B = 1,280,000 B. Rotation is CW (dest(y,x) =
+     * src(479-x, y)), matching the uploaded model: with CCW the console
+     * shows the setup screen upside-down (boottest204); with CW it is
+     * upright (boottest205). The register set carries no output-pitch
+     * field (set+0x08 is 0; full dump in boottest204/run.log), so the
+     * stride is taken from the copy loop / uploaded model, not the
+     * register set. */
+    dst = pxp_host_ptr(dst_pa, 800 * 800 * 2);
     if (!src || !dst) {
         return;
     }
-    /* 90 deg CCW: dest(row y, col x) = src(x_s = 799-y, y_s = x). */
+    /* 90 deg CW: dest(row y, col x) = src(row 479-x, col y). */
     for (y = 0; y < 800; y++) {
-        uint16_t *drow = (uint16_t *)(dst + y * 960);
+        uint16_t *drow = (uint16_t *)(dst + y * 1600);
         for (x = 0; x < 480; x++) {
-            uint16_t *srow = (uint16_t *)(src + x * 1600);
-            drow[x] = srow[799 - y];
+            uint16_t *srow = (uint16_t *)(src + (479 - x) * 1600);
+            drow[x] = srow[y];
         }
     }
-    fprintf(stderr, "pxp: blit src=0x%08x dst=0x%08x (800x480 -> 480x800 CCW)\n",
+    fprintf(stderr, "pxp: blit src=0x%08x dst=0x%08x (800x480 -> 480x800 CW, stride 1600)\n",
             src_pa, dst_pa);
 }
 
