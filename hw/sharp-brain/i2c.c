@@ -6,11 +6,14 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
+ * HW_I2C, bases 0x80058000 (I2C0) / 0x8005a000 (I2C1).
+ *
  * Master transfers triggered by CTRL0.RUN execute synchronously:
- * transmit bytes are taken from the DATA0-3 registers, received bytes
- * land there.  With no slave device attached the controller reports
- * NO_SLAVE_ACK, which the boot loader handles gracefully (the RTC /
- * battery sub-MCU of the real machine is not modelled yet).
+ * transmit bytes are taken from the DATA0-3 registers, received
+ * bytes land there.  A transfer to a slave that does not answer
+ * (e.g. the RTC / battery sub-MCU of the real machine, which is
+ * not modelled) reports NO_SLAVE_ACK, which the boot loader
+ * handles gracefully.
  *
  * When the APBX DMA drives the controller, a PIO descriptor programs
  * CTRL0/CTRL1 (RUN arms but does not start the transfer); the
@@ -67,6 +70,21 @@ static void i2c_update_irq(MxsI2cState *s)
     qemu_set_irq(s->irq, !!(en & st));
 }
 
+/* DATA0-3 hold the transfer bytes MSB-first, four per register */
+static void i2c_data_pack(MxsI2cState *s, const uint8_t *buf, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        s->data[i / 4] |= buf[i] << (24 - 8 * (i % 4));
+    }
+}
+
+static void i2c_data_unpack(MxsI2cState *s, uint8_t *buf, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        buf[i] = (s->data[i / 4] >> (24 - 8 * (i % 4))) & 0xff;
+    }
+}
+
 static void i2c_run(MxsI2cState *s)
 {
     uint32_t count = s->ctrl0 & BM_CTRL0_XFER_COUNT;
@@ -106,17 +124,13 @@ static void i2c_run(MxsI2cState *s)
         }
         i2c_end_transfer(s->bus);
         /* scatter the received bytes over DATA0..3 (MSB first) */
-        for (uint32_t i = 0; i < count; i++) {
-            s->data[i / 4] |= buf[i] << (24 - 8 * (i % 4));
-        }
+        i2c_data_pack(s, buf, count);
     } else {
         /* gather transmit bytes from DATA0..3 */
         if (count > sizeof(buf)) {
             count = sizeof(buf);
         }
-        for (uint32_t i = 0; i < count; i++) {
-            buf[i] = (s->data[i / 4] >> (24 - 8 * (i % 4))) & 0xff;
-        }
+        i2c_data_unpack(s, buf, count);
         if (count == 0) {
             goto done;
         }
@@ -178,6 +192,17 @@ static uint64_t i2c_read(void *opaque, hwaddr addr, unsigned size)
     return 0;
 }
 
+/* REG/SET/CLR/TOG alias write, shared by all registers below */
+static void i2c_alias_write(uint32_t *reg, uint32_t off, uint64_t val)
+{
+    switch (off) {
+    case 0:  *reg = val; break;
+    case 4:  *reg |= val; break;
+    case 8:  *reg &= ~val; break;
+    case 12: *reg ^= val; break;
+    }
+}
+
 /*
  * One stmp register write.  off selects the REG/SET/CLR/TOG alias.
  * from_dma: RUN only arms the transfer (the APBX data descriptor
@@ -186,22 +211,12 @@ static uint64_t i2c_read(void *opaque, hwaddr addr, unsigned size)
 static void i2c_write_one(MxsI2cState *s, uint32_t reg, uint32_t off,
                           uint64_t val, bool from_dma)
 {
-#define STMP_REG(field)                                         \
-    do {                                                        \
-        switch (off) {                                          \
-        case 0:  s->field = val; break;                         \
-        case 4:  s->field |= val; break;                         \
-        case 8:  s->field &= ~val; break;                         \
-        case 12: s->field ^= val; break;                         \
-        } \
-    } while (0)
-
     switch (reg) {
     case HW_I2C_CTRL0:
     {
         uint32_t old = s->ctrl0;
 
-        STMP_REG(ctrl0);
+        i2c_alias_write(&s->ctrl0, off, val);
         /* SFTRST rising edge -> clock gates once */
         if (!(old & BM_CTRL0_SFTRST) && (s->ctrl0 & BM_CTRL0_SFTRST)) {
             s->ctrl0 |= BM_CTRL0_CLKGATE;
@@ -216,10 +231,10 @@ static void i2c_write_one(MxsI2cState *s, uint32_t reg, uint32_t off,
         return;
     }
     case HW_I2C_TIMING0:
-        STMP_REG(timing0);
+        i2c_alias_write(&s->timing0, off, val);
         return;
     case HW_I2C_CTRL1:
-        STMP_REG(ctrl1);
+        i2c_alias_write(&s->ctrl1, off, val);
         i2c_update_irq(s);
         return;
     case HW_I2C_STAT:
@@ -227,31 +242,31 @@ static void i2c_write_one(MxsI2cState *s, uint32_t reg, uint32_t off,
         s->stat &= ~val;
         return;
     case HW_I2C_TIMING1:
-        STMP_REG(timing1);
+        i2c_alias_write(&s->timing1, off, val);
         return;
     case HW_I2C_TIMING2:
-        STMP_REG(timing2);
+        i2c_alias_write(&s->timing2, off, val);
         return;
     case HW_I2C_QUEUECTRL:
-        STMP_REG(queuectrl);
+        i2c_alias_write(&s->queuectrl, off, val);
         return;
     case HW_I2C_QUEUEEND:
-        STMP_REG(queueend);
+        i2c_alias_write(&s->queueend, off, val);
         return;
     case HW_I2C_QUEUECMD:
-        STMP_REG(queuecmd);
+        i2c_alias_write(&s->queuecmd, off, val);
         return;
     case HW_I2C_QUEUEDATA:
-        STMP_REG(queuedata);
+        i2c_alias_write(&s->queuedata, off, val);
         return;
     default:
         if (reg >= HW_I2C_DATA(0) && reg < HW_I2C_DATA(4)) {
-            STMP_REG(data[(reg - HW_I2C_DATA(0)) / 0x10]);
+            i2c_alias_write(&s->data[(reg - HW_I2C_DATA(0)) / 0x10],
+                            off, val);
             return;
         }
         break;
     }
-#undef STMP_REG
 
     qemu_log_mask(LOG_UNIMP, "mxs-i2c: unimplemented write 0x%08x"
                   " = 0x%" PRIx64 "\n", reg, val);
@@ -293,9 +308,7 @@ void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
         memset(buf, 0, sizeof(buf));
         address_space_read(&address_space_memory, bufaddr,
                            MEMTXATTRS_UNSPECIFIED, buf, len);
-        for (uint32_t i = 0; i < len; i++) {
-            s->data[i / 4] |= buf[i] << (24 - 8 * (i % 4));
-        }
+        i2c_data_pack(s, buf, len);
         if (s->run_pending) {
             i2c_run(s);
         }
@@ -306,9 +319,7 @@ void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
             i2c_run(s);
         }
         memset(buf, 0, sizeof(buf));
-        for (uint32_t i = 0; i < sizeof(buf); i++) {
-            buf[i] = (s->data[i / 4] >> (24 - 8 * (i % 4))) & 0xff;
-        }
+        i2c_data_unpack(s, buf, sizeof(buf));
         address_space_write(&address_space_memory, bufaddr,
                             MEMTXATTRS_UNSPECIFIED, buf, len);
     }
