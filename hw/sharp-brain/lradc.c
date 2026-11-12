@@ -6,6 +6,8 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
+ * HW_LRADC, base 0x80050000.
+ *
  * Plate switch encoding (HW_LRADC_CTRL0, i.MX28):
  *   bit 23 TOUCH_DETECT_ENABLE, bit 21 YNNSW, bit 20 YPNSW,
  *   bit 19 YPPSW, bit 18 XNNSW, bit 17 XNPSW, bit 16 XPPSW.
@@ -44,12 +46,16 @@
 #define HW_LRADC_VERSION      0x170
 
 /* CTRL0 bits */
+#define BM_CTRL0_SFTRST          (1 << 31)
+#define BM_CTRL0_CLKGATE         (1 << 30)
 #define BM_CTRL0_TOUCH_DETECT_EN (1 << 23)
-#define BM_CTRL0_YNNSW          (1 << 21)
-#define BM_CTRL0_YPPSW          (1 << 19)
-#define BM_CTRL0_XNNSW          (1 << 18)
-#define BM_CTRL0_XPPSW          (1 << 16)
-#define BM_CTRL0_SCHEDULE       0xff
+#define BM_CTRL0_YNNSW           (1 << 21)
+#define BM_CTRL0_YPNSW           (1 << 20)
+#define BM_CTRL0_YPPSW           (1 << 19)
+#define BM_CTRL0_XNNSW           (1 << 18)
+#define BM_CTRL0_XNPSW           (1 << 17)
+#define BM_CTRL0_XPPSW           (1 << 16)
+#define BM_CTRL0_SCHEDULE        0xff
 
 /* CTRL1 bits */
 #define BM_CTRL1_CH_IRQ_EN(n)   (1 << (16 + (n)))
@@ -77,6 +83,17 @@
 #define CH_YP 3
 #define CH_XM 4
 #define CH_YM 5
+
+/* REG/SET/CLR/TOG alias write (alias selector = offset bits 3:2) */
+static void lradc_alias_write(uint32_t *reg, uint32_t off, uint32_t value)
+{
+    switch (off) {
+    case 0x0: *reg = value; break;
+    case 0x4: *reg |= value; break;
+    case 0x8: *reg &= ~value; break;
+    case 0xc: *reg ^= value; break;
+    }
+}
 
 static void lradc_update_irq(MxsLradcState *s)
 {
@@ -311,7 +328,6 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
     return 0;
 }
 
-/* dbg wrapper */
 static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
                         unsigned size)
 {
@@ -324,15 +340,10 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
     {
         uint32_t old = s->ctrl0;
 
-        switch (offset & 0xc) {
-        case 0x0: s->ctrl0 = val; break;
-        case 0x4: s->ctrl0 |= val; break;
-        case 0x8: s->ctrl0 &= ~val; break;
-        case 0xc: s->ctrl0 ^= val; break;
-        }
+        lradc_alias_write(&s->ctrl0, offset & 0xc, val);
         /* SFTRST rising edge -> clock gates once */
-        if (!(old & (1u << 31)) && (s->ctrl0 & (1u << 31))) {
-            s->ctrl0 |= 1u << 30;
+        if (!(old & BM_CTRL0_SFTRST) && (s->ctrl0 & BM_CTRL0_SFTRST)) {
+            s->ctrl0 |= BM_CTRL0_CLKGATE;
         }
         /* writing SCHEDULE bits triggers an immediate conversion */
         if (val & BM_CTRL0_SCHEDULE) {
@@ -356,57 +367,27 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
         lradc_update_irq(s);
         return;
     case HW_LRADC_CTRL2:
-        switch (offset & 0xc) {
-        case 0x0: s->ctrl2 = val; break;
-        case 0x4: s->ctrl2 |= val; break;
-        case 0x8: s->ctrl2 &= ~val; break;
-        case 0xc: s->ctrl2 ^= val; break;
-        }
+        lradc_alias_write(&s->ctrl2, offset & 0xc, val);
         return;
     case HW_LRADC_CTRL3:
-        switch (offset & 0xc) {
-        case 0x0: s->ctrl3 = val; break;
-        case 0x4: s->ctrl3 |= val; break;
-        case 0x8: s->ctrl3 &= ~val; break;
-        case 0xc: s->ctrl3 ^= val; break;
-        }
+        lradc_alias_write(&s->ctrl3, offset & 0xc, val);
         return;
     case HW_LRADC_CTRL4:
-        switch (offset & 0xc) {
-        case 0x0: s->ctrl4 = val; break;
-        case 0x4: s->ctrl4 |= val; break;
-        case 0x8: s->ctrl4 &= ~val; break;
-        case 0xc: s->ctrl4 ^= val; break;
-        }
+        lradc_alias_write(&s->ctrl4, offset & 0xc, val);
         return;
     case HW_LRADC_CONVERSION:
-        switch (offset & 0xc) {
-        case 0x0: s->conversion = val; break;
-        case 0x4: s->conversion |= val; break;
-        case 0x8: s->conversion &= ~val; break;
-        case 0xc: s->conversion ^= val; break;
-        }
+        lradc_alias_write(&s->conversion, offset & 0xc, val);
         return;
     default:
         for (int n = 0; n < MXS_LRADC_NUM_CH; n++) {
             if ((offset & ~0xcull) == HW_LRADC_CH(n)) {
-                switch (offset & 0xc) {
-                case 0x0: s->ch[n] = val; break;
-                case 0x4: s->ch[n] |= val; break;
-                case 0x8: s->ch[n] &= ~val; break;
-                case 0xc: s->ch[n] ^= val; break;
-                }
+                lradc_alias_write(&s->ch[n], offset & 0xc, val);
                 return;
             }
         }
         for (int n = 0; n < 4; n++) {
             if ((offset & ~0xcull) == HW_LRADC_DELAY(n)) {
-                switch (offset & 0xc) {
-                case 0x0: s->delay[n] = val; break;
-                case 0x4: s->delay[n] |= val; break;
-                case 0x8: s->delay[n] &= ~val; break;
-                case 0xc: s->delay[n] ^= val; break;
-                }
+                lradc_alias_write(&s->delay[n], offset & 0xc, val);
                 if (s->delay[n] & BM_DELAY_KICK) {
                     uint32_t mask = s->delay[n] >> BP_DELAY_TRIGGER_LRADCS;
                     s->delay[n] &= ~BM_DELAY_KICK;
@@ -417,12 +398,7 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
         }
         for (int n = 0; n < 2; n++) {
             if ((offset & ~0xcull) == HW_LRADC_THRESHOLD(n)) {
-                switch (offset & 0xc) {
-                case 0x0: s->threshold[n] = val; break;
-                case 0x4: s->threshold[n] |= val; break;
-                case 0x8: s->threshold[n] &= ~val; break;
-                case 0xc: s->threshold[n] ^= val; break;
-                }
+                lradc_alias_write(&s->threshold[n], offset & 0xc, val);
                 return;
             }
         }
