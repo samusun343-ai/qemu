@@ -65,6 +65,9 @@
 #define IMX28_IRQ_LRADC_THRESH0 14
 #define IMX28_IRQ_LRADC_THRESH1 15
 #define IMX28_IRQ_LRADC_CH(n)  (16 + (n))
+#define IMX28_IRQ_LRADC_BTN0   24
+#define IMX28_IRQ_LRADC_BTN1   25
+#define IMX28_IRQ_RTC          29
 #define IMX28_IRQ_LCDIF        38
 #define IMX28_IRQ_BCH          41
 #define IMX28_IRQ_DUART        47
@@ -82,6 +85,8 @@
 #define IMX28_IRQ_USB0         93  /* imx28.dtsi usb0 (usb1 = 92) */
 #define IMX28_IRQ_SSP0         96
 #define IMX28_IRQ_SSP1         97
+#define IMX28_IRQ_I2C1         110
+#define IMX28_IRQ_I2C0         111
 #define IMX28_NUM_IRQS         128
 
 /* blocks modelled as plain stmp register files with the SFTRST/CLKGATE

@@ -10,8 +10,10 @@
  * APBH/APBX peripheral set at 0x80000000 that the Sharp boot chain
  * (boot ROM -> SB stream -> stage0 -> EBOOT -> Windows CE) touches.
  *
- * Blocks that are not modelled yet (GPMI/NAND, DCP, AUART, I2C, USB,
- * CAN, SAIF, SPDIF, RTC, PWM, ...) are instantiated as unimplemented
+ * Most blocks have real models in this directory; the AUART/SAIF/
+ * SPDIF/DCP/PXP-class blocks are plain register files with the
+ * SFTRST/CLKGATE handshake (misc.c).  Blocks the guest never uses
+ * (HSADC, CAN, Ethernet, ...) are instantiated as unimplemented
  * devices so accesses log but do not fault.
  */
 
@@ -235,7 +237,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(s->apbh_dma), 0, IMX28_APBH_DMA_BASE);
-    for (int i = 0; i < MXS_DMA_CHANNELS; i++) {
+    {
         static const int dma_irq_map[MXS_DMA_CHANNELS] = {
             82, 83, 84, 85,     /* SSP0-3 */
             88, 88, 88, 88,     /* GPMI0-3 */
@@ -244,9 +246,12 @@ static void imx28_realize(DeviceState *dev, Error **errp)
             86,                 /* LCDIF */
             0, 0,
         };
-        sysbus_connect_irq(SYS_BUS_DEVICE(s->apbh_dma), i,
-                           qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
-                                                  dma_irq_map[i]));
+        for (int i = 0; i < MXS_DMA_CHANNELS; i++) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(s->apbh_dma), i,
+                               qdev_get_gpio_in_named(DEVICE(s->icoll),
+                                                      "irqs",
+                                                      dma_irq_map[i]));
+        }
     }
 
     /*
@@ -321,14 +326,14 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->ocotp), 0, IMX28_OCOTP_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->emi), 0, IMX28_EMI_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->rtc), 0, IMX28_RTC_BASE);
-    imx28_icoll_connect(s, s->rtc, 29);   /* alarm / onemsec IRQ */
+    imx28_icoll_connect(s, s->rtc, IMX28_IRQ_RTC); /* alarm / onemsec */
     sysbus_mmio_map(SYS_BUS_DEVICE(s->pinctrl), 0, IMX28_PINCTRL_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->timrot), 0, IMX28_TIMROT_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lcdif), 0, IMX28_LCDIF_BASE);
 
     /* PWM (backlight) and the USB PHYs: register files with the
      * SFTRST/CLKGATE handshake; the USB driver resets the PHYs
-     * during cspddk init and polls CTRL.C LKGATE (at 0x30) */
+     * during cspddk init and polls CTRL.CLKGATE (at 0x30) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->pwm), errp) ||
         !sysbus_realize(SYS_BUS_DEVICE(s->usbphy[0]), errp) ||
         !sysbus_realize(SYS_BUS_DEVICE(s->usbphy[1]), errp)) {
@@ -356,9 +361,9 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                         imx28_stmp_blocks[i].base);
         if (imx28_stmp_blocks[i].irq >= 0) {
             sysbus_connect_irq(SYS_BUS_DEVICE(s->stmp[i]), 0,
-                               qdev_get_gpio_in_named(DEVICE(s->icoll),
-                                                      "irqs",
-                                                      imx28_stmp_blocks[i].irq));
+                               qdev_get_gpio_in_named(
+                                   DEVICE(s->icoll), "irqs",
+                                   imx28_stmp_blocks[i].irq));
         }
     }
 
@@ -371,7 +376,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                         IMX28_I2C0_BASE + i * 0x2000);
         sysbus_connect_irq(SYS_BUS_DEVICE(s->i2c[i]), 0,
                            qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
-                                                  111 - i));
+                                                  IMX28_IRQ_I2C0 - i));
     }
 
     /*
@@ -397,7 +402,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
             IMX28_IRQ_LRADC_CH(2), IMX28_IRQ_LRADC_CH(3),
             IMX28_IRQ_LRADC_CH(4), IMX28_IRQ_LRADC_CH(5),
             IMX28_IRQ_LRADC_CH(6), IMX28_IRQ_LRADC_CH(7),
-            24, 25,
+            IMX28_IRQ_LRADC_BTN0, IMX28_IRQ_LRADC_BTN1,
         };
         for (int i = 0; i < MXS_LRADC_NUM_IRQ; i++) {
             sysbus_connect_irq(SYS_BUS_DEVICE(s->lradc), i,
@@ -520,7 +525,8 @@ static void imx28_init(Object *obj)
     for (int i = 0; i < IMX28_NUM_STMP_BLOCKS; i++) {
         s->stmp[i] = qdev_new(imx28_stmp_blocks[i].type);
         object_property_add_child(obj,
-                                  g_strdup_printf("%s", imx28_stmp_blocks[i].name),
+                                  g_strdup_printf("%s",
+                                                  imx28_stmp_blocks[i].name),
                                   OBJECT(s->stmp[i]));
     }
 
