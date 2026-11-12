@@ -49,6 +49,8 @@
 #define IMX28_BCH_BASE         0x8000a000
 #define IMX28_IRQ_GPMI         88
 #define IMX28_IRQ_BCH          41
+#define IMX28_USB0_BASE        0x80080000
+#define IMX28_IRQ_USB0         93  /* imx28.dtsi usb0 (usb1 = 92) */
 
 /* IRQ numbers (i.MX28 ICOLL, from linux-brain imx28.dtsi) */
 #define IMX28_IRQ_GPIO0        127
@@ -114,6 +116,7 @@ struct Imx28State {
     DeviceState *rtc;          /* stmp3xxx RTC block */
     DeviceState *pwm;          /* PWM block w/ channel-present bits */
     DeviceState *usbphy[2];    /* USB PHY0/1 */
+    DeviceState *usb_otg;      /* USB0 OTG controller stub */
     DeviceState *stmp[IMX28_NUM_STMP_BLOCKS]; /* AUART/SAIF/SPDIF/... */
     DeviceState *lcdif;
     DeviceState *i2c[2];        /* I2C0: sub-MCU bus, I2C1 */
@@ -305,6 +308,14 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_PWM "mxs-pwm"
 #define TYPE_MXS_STMP "mxs-stmp"
 #define TYPE_MXS_PXP "mxs-pxp"
+#define TYPE_MXS_USB_OTG "mxs-usb-otg"
+#define TYPE_BU26154 "bu26154"
+
+/* ROHM BU26154 audio codec: I2C slave address 0x1A (7-bit, SAD pin
+ * = "L"; 0x1B if SAD = "H").  Datasheet TSZ22111 Rev.002.  The
+ * codec lives on I2C0 (brainux imx28-brain.dtsi codec node under
+ * i2c@80058000). */
+#define BU26154_I2C_ADDR 0x1a
 
 /* ------------------------------------------------------------------ */
 /* I2C (hw/sharp-brain/i2c.c)                                         */

@@ -20,6 +20,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "hw/char/pl011.h"
+#include "hw/i2c/i2c.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/unimp.h"
 #include "system/address-spaces.h"
@@ -84,7 +85,7 @@ static const struct {
     { "imx28-axi-ahb0", 0x8002e000, 0x2000 },
     { "imx28-can0",     0x80032000, 0x2000 },
     { "imx28-can1",     0x80034000, 0x2000 },
-    { "imx28-usb0",     0x80080000, 0x10000 },
+    /* USB0 is modelled (usb-otg.c); USB1 is untouched by the guest */
     { "imx28-usb1",     0x80090000, 0x10000 },
     { "imx28-dflpt",    0x800c0000, 0x2000 },
     { "imx28-enet0",    0x800f0000, 0x4000 },
@@ -337,6 +338,15 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[0]), 0, 0x8007c000);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[1]), 0, 0x8007e000);
 
+    /* USB0 OTG controller (register stub, "no cable" state).
+     * IRQ 93 (linux imx28.dtsi).  The stub never raises it (no
+     * cable, no events). */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->usb_otg), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->usb_otg), 0, IMX28_USB0_BASE);
+    imx28_icoll_connect(s, s->usb_otg, IMX28_IRQ_USB0);
+
     /* remaining stmp blocks (AUART/SAIF/SPDIF/AUDIO/DCP/PXP) */
     for (int i = 0; i < IMX28_NUM_STMP_BLOCKS; i++) {
         if (!sysbus_realize(SYS_BUS_DEVICE(s->stmp[i]), errp)) {
@@ -362,6 +372,15 @@ static void imx28_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
                                                   111 - i));
     }
+
+    /*
+     * ROHM BU26154 audio codec on I2C0 (board wiring per brainux
+     * imx28-brain.dtsi: the codec node sits under i2c@80058000).
+     * Presence/ACK stub only; the guest makes no I2C transfers at
+     * boot, so this is unexercised until WaveDev runs.
+     */
+    i2c_slave_create_simple(MXS_I2C(s->i2c[0])->bus, TYPE_BU26154,
+                            BU26154_I2C_ADDR);
 
     /* LRADC (ADC + 4-wire touch) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->lradc), errp)) {
@@ -495,6 +514,8 @@ static void imx28_init(Object *obj)
         object_property_add_child(obj, g_strdup_printf("usbphy%d", i),
                                   OBJECT(s->usbphy[i]));
     }
+    s->usb_otg = qdev_new(TYPE_MXS_USB_OTG);
+    object_property_add_child(obj, "usb-otg", OBJECT(s->usb_otg));
     for (int i = 0; i < IMX28_NUM_STMP_BLOCKS; i++) {
         s->stmp[i] = qdev_new(imx28_stmp_blocks[i].type);
         object_property_add_child(obj,

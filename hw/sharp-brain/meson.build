@@ -10,8 +10,10 @@ system_ss.add(when: 'CONFIG_SHARP_BRAIN', if_true: files(
   'ssp.c',
   'lradc.c',
   'i2c.c',
+  'bu26154.c',
   'lcdif.c',
   'misc.c',
+  'usb-otg.c',
   'timrot.c',
   'pinctrl.c',
 ))
