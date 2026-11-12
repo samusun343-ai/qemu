@@ -6,6 +6,7 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
+ * HW_RTC, base 0x80056000 (as mapped by the SoC code in imx28.c).
  * The block carries a battery-backed seconds/milliseconds counter
  * plus six "persistent" registers that survive resets; the Windows
  * CE power driver arms PERSISTENT0.AUTO_RESTART (bit 17) and polls
@@ -75,7 +76,7 @@
 
 OBJECT_DECLARE_SIMPLE_TYPE(MxsRtcState, MXS_RTC)
 
-struct MxsRtcState {
+typedef struct MxsRtcState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     qemu_irq irq;
@@ -89,7 +90,18 @@ struct MxsRtcState {
     uint64_t epoch_seconds;    /* guest-visible seconds at sec_base_ns */
     int64_t ms_base_ns;        /* host ns when MILLISECONDS was written  */
     uint32_t ms_offset;        /* guest-visible ms value at ms_base_ns   */
-};
+} MxsRtcState;
+
+/* REG/SET/CLR/TOG alias write, shared by the register blocks below */
+static void rtc_alias_write(uint32_t *reg, uint32_t off, uint32_t value)
+{
+    switch (off) {
+    case 0:  *reg = value; break;
+    case 4:  *reg |= value; break;
+    case 8:  *reg &= ~value; break;
+    case 12: *reg ^= value; break;
+    }
+}
 
 static void rtc_irq_update(MxsRtcState *s)
 {
@@ -160,12 +172,7 @@ static void rtc_write(void *opaque, hwaddr addr, uint64_t value,
     if (reg >= HW_RTC_PERSISTENT(0) && reg <= HW_RTC_PERSISTENT(5)) {
         int n = (reg - HW_RTC_PERSISTENT(0)) / 0x10;
 
-        switch (off) {
-        case 0:  s->persistent[n] = value; break;
-        case 4:  s->persistent[n] |= value; break;
-        case 8:  s->persistent[n] &= ~value; break;
-        case 12: s->persistent[n] ^= value; break;
-        }
+        rtc_alias_write(&s->persistent[n], off, value);
         return;
     }
 
@@ -174,12 +181,7 @@ static void rtc_write(void *opaque, hwaddr addr, uint64_t value,
     {
         uint32_t old = s->ctrl;
 
-        switch (off) {
-        case 0:  s->ctrl = value; break;
-        case 4:  s->ctrl |= value; break;
-        case 8:  s->ctrl &= ~value; break;
-        case 12: s->ctrl ^= value; break;
-        }
+        rtc_alias_write(&s->ctrl, off, value);
         /* SFTRST rising edge gates the clock (guest reset poll) */
         if (!(old & BM_RTC_CTRL_SFTRST) && (s->ctrl & BM_RTC_CTRL_SFTRST)) {
             s->ctrl |= BM_RTC_CTRL_CLKGATE;
