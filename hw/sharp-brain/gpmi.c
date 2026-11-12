@@ -445,7 +445,9 @@ static void nand_exec(MxsGpmiState *s)
         if (s->nand_state == NAND_ST_CONFIRM) {
             uint8_t *page = nand_page_ptr(s, s->row);
             if (!page) {
-                static const uint8_t ff[NAND_PAGE_TOTAL] = { [0 ... NAND_PAGE_TOTAL - 1] = 0xff };
+                static const uint8_t ff[NAND_PAGE_TOTAL] = {
+                    [0 ... NAND_PAGE_TOTAL - 1] = 0xff
+                };
                 nand_set_read(s, ff, NAND_PAGE_TOTAL);
             } else {
                 uint32_t off = s->col < NAND_PAGE_TOTAL ? s->col : 0;

@@ -481,7 +481,8 @@ static uint64_t lcdif_read(void *opaque, hwaddr addr, unsigned size)
         if (reg >= HW_LCDIF_DVICTRL(0) && reg < HW_LCDIF_DVICTRL(4)) {
             return s->dvi[(reg - HW_LCDIF_DVICTRL(0)) / 0x10];
         }
-        if (reg >= HW_LCDIF_CSC_COEFF(0) && reg < HW_LCDIF_CSC_COEFF(0) + 0x40) {
+        if (reg >= HW_LCDIF_CSC_COEFF(0) &&
+            reg < HW_LCDIF_CSC_COEFF(0) + 0x40) {
             return s->csc[(reg - HW_LCDIF_CSC_COEFF(0)) / 0x10];
         }
         break;
@@ -568,7 +569,8 @@ static void lcdif_write(void *opaque, hwaddr addr, uint64_t val,
             s->dvi[(reg - HW_LCDIF_DVICTRL(0)) / 0x10] = val;
             return;
         }
-        if (reg >= HW_LCDIF_CSC_COEFF(0) && reg < HW_LCDIF_CSC_COEFF(0) + 0x40) {
+        if (reg >= HW_LCDIF_CSC_COEFF(0) &&
+            reg < HW_LCDIF_CSC_COEFF(0) + 0x40) {
             s->csc[(reg - HW_LCDIF_CSC_COEFF(0)) / 0x10] = val;
             return;
         }
@@ -634,7 +636,8 @@ static bool lcdif_gfx_update(void *opaque)
         for (int x = 0; x < w; x++) {
             int nx = y;
             int ny = ILI9805_NATIVE_HEIGHT - 1 - x;
-            uint16_t rgb = (nx >= 0 && ny >= 0) ? s->gram[ny * ILI9805_NATIVE_WIDTH + nx] : 0;
+            uint16_t rgb = (nx >= 0 && ny >= 0)
+                ? s->gram[ny * ILI9805_NATIVE_WIDTH + nx] : 0;
             int r = ((rgb >> 11) & 0x1f) << 3;
             int g = ((rgb >> 5) & 0x3f) << 2;
             int b = (rgb & 0x1f) << 3;
