@@ -320,7 +320,7 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->power), 0, IMX28_POWER_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->ocotp), 0, IMX28_OCOTP_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->emi), 0, IMX28_EMI_BASE);
-    sysbus_mmio_map(SYS_BUS_DEVICE(s->rtc), 0, 0x80056000);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->rtc), 0, IMX28_RTC_BASE);
     imx28_icoll_connect(s, s->rtc, 29);   /* alarm / onemsec IRQ */
     sysbus_mmio_map(SYS_BUS_DEVICE(s->pinctrl), 0, IMX28_PINCTRL_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->timrot), 0, IMX28_TIMROT_BASE);
@@ -334,9 +334,9 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         !sysbus_realize(SYS_BUS_DEVICE(s->usbphy[1]), errp)) {
         return;
     }
-    sysbus_mmio_map(SYS_BUS_DEVICE(s->pwm), 0, 0x80064000);
-    sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[0]), 0, 0x8007c000);
-    sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[1]), 0, 0x8007e000);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->pwm), 0, IMX28_PWM_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[0]), 0, IMX28_USBPHY0_BASE);
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->usbphy[1]), 0, IMX28_USBPHY1_BASE);
 
     /* USB0 OTG controller (register stub, "no cable" state).
      * IRQ 93 (linux imx28.dtsi).  The stub never raises it (no
@@ -367,7 +367,8 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         if (!sysbus_realize(SYS_BUS_DEVICE(s->i2c[i]), errp)) {
             return;
         }
-        sysbus_mmio_map(SYS_BUS_DEVICE(s->i2c[i]), 0, 0x80058000 + i * 0x2000);
+        sysbus_mmio_map(SYS_BUS_DEVICE(s->i2c[i]), 0,
+                        IMX28_I2C0_BASE + i * 0x2000);
         sysbus_connect_irq(SYS_BUS_DEVICE(s->i2c[i]), 0,
                            qdev_get_gpio_in_named(DEVICE(s->icoll), "irqs",
                                                   111 - i));

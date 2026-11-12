@@ -109,8 +109,6 @@
 #define CMD0_CMD_MASK           0xff
 #define CMD0_APPEND_8CYC        (1 << 20)
 
-#define SSP_FIFO_WORDS  32
-
 /* REG/SET/CLR/TOG alias write, shared by the plain storage registers */
 static void ssp_alias_write(uint32_t *reg, uint32_t off, uint32_t value)
 {

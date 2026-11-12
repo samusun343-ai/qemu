@@ -29,6 +29,8 @@
 
 #define IMX28_ICOLL_BASE       0x80000000
 #define IMX28_APBH_DMA_BASE    0x80004000
+#define IMX28_BCH_BASE         0x8000a000
+#define IMX28_GPMI_BASE        0x8000c000
 #define IMX28_SSP0_BASE        0x80010000
 #define IMX28_SSP1_BASE        0x80012000
 #define IMX28_SSP2_BASE        0x80014000
@@ -36,21 +38,22 @@
 #define IMX28_PINCTRL_BASE     0x80018000
 #define IMX28_DIGCTL_BASE      0x8001c000
 #define IMX28_APBX_DMA_BASE    0x80024000
+#define IMX28_OCOTP_BASE       0x8002c000
 #define IMX28_LCDIF_BASE       0x80030000
 #define IMX28_BOOTROM_MAILBOX  0x8003c000      /* SIMDBG block (unused) */
 #define IMX28_CLKCTRL_BASE     0x80040000
 #define IMX28_POWER_BASE       0x80044000
 #define IMX28_LRADC_BASE       0x80050000
+#define IMX28_RTC_BASE         0x80056000
+#define IMX28_I2C0_BASE        0x80058000
+#define IMX28_I2C1_BASE        0x8005a000
+#define IMX28_PWM_BASE         0x80064000
 #define IMX28_TIMROT_BASE      0x80068000
 #define IMX28_DUART_BASE       0x80074000
-#define IMX28_EMI_BASE         0x800e0000
-#define IMX28_OCOTP_BASE       0x8002c000
-#define IMX28_GPMI_BASE        0x8000c000
-#define IMX28_BCH_BASE         0x8000a000
-#define IMX28_IRQ_GPMI         88
-#define IMX28_IRQ_BCH          41
+#define IMX28_USBPHY0_BASE     0x8007c000
+#define IMX28_USBPHY1_BASE     0x8007e000
 #define IMX28_USB0_BASE        0x80080000
-#define IMX28_IRQ_USB0         93  /* imx28.dtsi usb0 (usb1 = 92) */
+#define IMX28_EMI_BASE         0x800e0000
 
 /* IRQ numbers (i.MX28 ICOLL, from linux-brain imx28.dtsi) */
 #define IMX28_IRQ_GPIO0        127
@@ -63,6 +66,7 @@
 #define IMX28_IRQ_LRADC_THRESH1 15
 #define IMX28_IRQ_LRADC_CH(n)  (16 + (n))
 #define IMX28_IRQ_LCDIF        38
+#define IMX28_IRQ_BCH          41
 #define IMX28_IRQ_DUART        47
 #define IMX28_IRQ_TIMROT0      48
 #define IMX28_IRQ_TIMROT1      49
@@ -72,9 +76,10 @@
 #define IMX28_IRQ_APBH_SSP1    83
 #define IMX28_IRQ_APBH_SSP2    84
 #define IMX28_IRQ_APBH_SSP3    85
-#define IMX28_IRQ_APBH_GPMI    88
-#define IMX28_IRQ_APBH_HSADC   87
 #define IMX28_IRQ_APBH_LCDIF   86
+#define IMX28_IRQ_APBH_HSADC   87
+#define IMX28_IRQ_APBH_GPMI    88
+#define IMX28_IRQ_USB0         93  /* imx28.dtsi usb0 (usb1 = 92) */
 #define IMX28_IRQ_SSP0         96
 #define IMX28_IRQ_SSP1         97
 #define IMX28_NUM_IRQS         128
@@ -191,6 +196,8 @@ struct MxsDmaState {
 #define TYPE_MXS_SSP "mxs-ssp"
 OBJECT_DECLARE_SIMPLE_TYPE(MxsSspState, MXS_SSP)
 
+#define SSP_FIFO_WORDS 32
+
 struct MxsSspState {
     SysBusDevice parent_obj;
 
@@ -205,7 +212,7 @@ struct MxsSspState {
     uint32_t version;
 
     /* data FIFO state */
-    uint32_t fifo[32];
+    uint32_t fifo[SSP_FIFO_WORDS];
     uint32_t fifo_level;        /* words available */
     bool data_dir_read;
     uint32_t data_remaining;
@@ -390,10 +397,11 @@ void mxs_pinctrl_rearm_kbd_irq(DeviceState *dev);
 /*
  * Public: observe GPIO output changes.
  *
- * The matrix keyboard reads the column drive state from the pinctrl
- * DOUT/DOE registers, so it needs to be notified whenever the guest
- * re-drives the column pins.  The callback receives the new
- * "effective output" value (DOUT & DOE) of the bank that changed.
+ * The matrix keyboard derives the column levels from the row drive
+ * state in the pinctrl DOUT/DOE registers, so it needs to be
+ * notified whenever the guest re-drives the row pins (GPIO4).  The
+ * callback receives the new "effective output" value (DOUT & DOE)
+ * of the bank that changed.
  */
 typedef void MxsGpioOutNotify(void *opaque, int bank, uint32_t out);
 
@@ -440,8 +448,8 @@ typedef struct BrainKeyDef {
 typedef struct BrainKbdLayout {
     const char *name;
     int symbol_row, symbol_col; /* "symbols" modifier contact        */
-    const BrainKeyDef *direct;  /* [Q_KEY_CODE__MAX] host keys        */
-    const BrainKeyDef *combo;   /* [Q_KEY_CODE__MAX] Ctrl+key combos  */
+    const BrainKeyDef *direct;  /* [KEY_CNT] host keys        */
+    const BrainKeyDef *combo;   /* [KEY_CNT] Ctrl+key combos  */
 } BrainKbdLayout;
 
 const BrainKbdLayout *brain_kbd_find_layout(const char *name);
