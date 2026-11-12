@@ -68,6 +68,7 @@
 #define BOOTROM_TRAMPOLINE  0x0001ff00      /* top of IRAM (unused by ROM images) */
 #define BOOTROM_MAILBOX     0x8003c000      /* SIMDBG block, unused on Brain */
 #define BOOTROM_SP          0x00020000      /* IRAM top */
+#define BOOTROM_PARK_PC     0x0001fff8      /* self-loop at IRAM top - 8 */
 
 /* SB boot command tags */
 #define SB_CMD_NOP    0x00
@@ -208,7 +209,7 @@ static uint8_t *bootrom_load_sb(uint32_t *out_size)
     if (!bootrom_pread((uint64_t)boot_part_lba * 512, sizeof(cfg), cfg)) {
         return NULL;
     }
-    if (le32_to_cpu(*(uint32_t *)cfg) != 0x00112233) {
+    if (ldl_le_p(cfg) != 0x00112233) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "bootrom: bad boot config block magic\n");
         return NULL;
@@ -220,8 +221,8 @@ static uint8_t *bootrom_load_sb(uint32_t *out_size)
      *   +0x18: slot[0] { tag, first_sector, sector_count, pad }
      *   +0x2c: slot[1] { ... }
      */
-    slot_lba = le32_to_cpu(*(uint32_t *)&cfg[0x1c]);
-    slot_sectors = le32_to_cpu(*(uint32_t *)&cfg[0x20]);
+    slot_lba = ldl_le_p(&cfg[0x1c]);
+    slot_sectors = ldl_le_p(&cfg[0x20]);
     if (slot_lba == 0 || slot_sectors == 0 || slot_sectors > 65536) {
         qemu_log_mask(LOG_GUEST_ERROR, "bootrom: bad boot slot geometry\n");
         return NULL;
@@ -411,10 +412,10 @@ static void bootrom_park_cpu(void)
     CPUState *cs = CPU(cpu);
 
     cpu_reset(cs);
-    cpu_set_pc(cs, 0x0001fff8);
+    cpu_set_pc(cs, BOOTROM_PARK_PC);
     /* a self-loop is at the IRAM top-8; write it */
     uint32_t spin = 0xeafffffe;
-    address_space_write(&address_space_memory, 0x0001fff8,
+    address_space_write(&address_space_memory, BOOTROM_PARK_PC,
                         MEMTXATTRS_UNSPECIFIED, &spin, 4);
 }
 
