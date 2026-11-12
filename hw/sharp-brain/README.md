@@ -352,6 +352,32 @@ paths call `lcdif_transfer_done()`.  The WinCE display driver
 completes frames on the APBH channel IRQ (86) today, so this may be
 fine as-is; revisit with a trace once the eMMC boot test runs.
 
+Code audit 2026-11-12 (no change, by design): the DMA hook in
+`apbh-dma.c` (ch 13, `mxs_lcdif_dma_data`) pushes pixels straight
+into the panel GRAM and invalidates the console; descriptor chains
+with CCW_IRQ set raise the per-channel APBH IRQ (ch 13 = IRQ 86) via
+`mxs_dma_irq_update()`, which is the completion signal the driver
+waits on.  Adding `lcdif_transfer_done()` to the DMA hook would clear
+RUN and raise LCDIF IRQs the driver does not expect while a chain is
+still running, and CUR/NEXT_BUF are not read during DMA pushes, so
+the gap is benign for this driver.  Re-check at boot with a trace
+counting LCDIF IRQ assertions vs APBH IRQ 86 before changing it.
+
+### I2C master address form (2026-11-12, fix in `i2c.c`, unpushed)
+
+`i2c_run()` passed the 8-bit address byte straight to QEMU's I2C
+core, which matches slaves by 7-bit address - every in-tree master
+passes `addr >> 1` (cf. `hw/i2c/imx_i2c.c`,
+`extract32(s->i2dr_write, 1, 7)`).  Write path now passes
+`buf[0] >> 1`; read path now takes the address from the first DATA
+byte (`(s->data[0] >> 25) & 0x7f`) instead of CTRL1 - on the i.MX28
+the address byte is the first byte of the data stream (Linux
+`i2c-mxs.c` puts `i2c_8bit_addr_from_msg()` first into the queue),
+while CTRL1.SLAVE_ADDRESS_BYTE is the address this block responds
+to in slave mode.  Invisible so far (no slave attached, every
+transfer NAKs and the guest handles that), but it unblocks attaching
+an SX8650 on I2C1 and the RTC/battery sub-MCU on I2C0.
+
 ## Other known gaps
 
 * `touchkey_point_calibration() FAILED!` (touchkey.cpp:223).  The full

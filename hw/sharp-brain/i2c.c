@@ -84,8 +84,19 @@ static void i2c_run(MxsI2cState *s)
         if (count > sizeof(buf)) {
             count = sizeof(buf);
         }
-        /* address byte comes from CTRL1 slave address field */
-        ret = i2c_start_recv(s->bus, (s->ctrl1 >> 16) & 0xfe);
+        /*
+         * Master-mode address: the first DATA byte is the 8-bit
+         * address byte on the wire (Linux i2c-mxs puts
+         * i2c_8bit_addr_from_msg() first into the data stream;
+         * CTRL1.SLAVE_ADDRESS_BYTE is the address this block
+         * responds to in *slave* mode, not the master address).
+         * QEMU's i2c core matches slaves by 7-bit address (all
+         * in-tree masters pass addr >> 1), so shift it down here.
+         * The old code took the address from CTRL1 and passed the
+         * 8-bit byte straight through, so no slave could ever
+         * match (masked only because no slave is attached yet).
+         */
+        ret = i2c_start_recv(s->bus, (s->data[0] >> 25) & 0x7f);
         if (ret < 0) {
             s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
             goto done;
@@ -109,7 +120,8 @@ static void i2c_run(MxsI2cState *s)
         if (count == 0) {
             goto done;
         }
-        ret = i2c_start_send(s->bus, buf[0]);
+        /* buf[0] is the 8-bit address byte; QEMU matches 7-bit */
+        ret = i2c_start_send(s->bus, buf[0] >> 1);
         if (ret < 0) {
             s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
             goto done;
