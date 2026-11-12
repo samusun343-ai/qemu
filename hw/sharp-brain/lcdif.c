@@ -239,6 +239,8 @@ static void lcdif_update_irq(MxsLcdifPriv *s)
  * completion deadlocks the driver after the initial pushes.  Re-arm
  * every 16.667 ms (QEMU_CLOCK_VIRTUAL: follows guest virtual time). */
 #define LCDIF_VSYNC_PERIOD_NS (16666667ULL)
+#define LCDIF_REPUSH_VSYNCS 30   /* re-check the framebuffer every 0.5 s */
+static void lcdif_repush_if_dirty(MxsLcdifPriv *s);
 static void lcdif_vsync_tick(void *opaque)
 {
     MxsLcdifPriv *s = opaque;
@@ -248,6 +250,103 @@ static void lcdif_vsync_tick(void *opaque)
     timer_mod(s->vsync_timer,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                   LCDIF_VSYNC_PERIOD_NS);
+    if (s->full_frame_buf) {
+        lcdif_repush_if_dirty(s);
+    }
+}
+
+/* FNV-1a checksum over a host buffer (fast framebuffer change check) */
+static uint32_t lcdif_crc_host(const uint8_t *p, size_t len)
+{
+    uint32_t h = 0x811c9dc5u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+/* checksum of a guest-memory region, read in 4 KiB chunks */
+static uint32_t lcdif_crc_guest(hwaddr buf, uint32_t len)
+{
+    uint32_t h = 0x811c9dc5u;
+    uint8_t tmp[4096];
+    uint32_t off = 0;
+
+    while (off < len) {
+        uint32_t n = len - off < sizeof(tmp) ? len - off : sizeof(tmp);
+        if (address_space_read(&address_space_memory, buf + off,
+                               MEMTXATTRS_UNSPECIFIED, tmp, n) != MEMTX_OK) {
+            break;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            h ^= tmp[i];
+            h *= 0x01000193u;
+        }
+        off += n;
+    }
+    return h;
+}
+
+/*
+ * VSYNC dirty re-push: the shell draws desktop content into the
+ * framebuffer directly and the driver only pushes on present, so a
+ * frame can be drawn after the driver's last push and never reach
+ * the panel (the desktop icons sit in the framebuffer while the
+ * console still shows the earlier, black frame).  Every 30 VSYNCs,
+ * if the LCDIF is idle and the full framebuffer has changed since
+ * it was last pushed, re-stream the full frame into the GRAM
+ * (internal only: does not touch the guest-visible RUN/IRQ state,
+ * which the driver left parked).  This keeps the console tracking
+ * the framebuffer the way a continuously-scanning display would.
+ * The full frame is used (not the last pushed region) because the
+ * last push is often the small menu-bar strip while the content
+ * lands in the main area.
+ */
+static void lcdif_repush_if_dirty(MxsLcdifPriv *s)
+{
+    uint32_t total = ILI9805_NATIVE_WIDTH * ILI9805_NATIVE_HEIGHT;
+    uint32_t crc;
+    uint8_t *mem;
+
+    if (!s->panel_on || (s->ctrl & BM_CTRL_RUN)) {
+        return;
+    }
+    if (++s->vsync_repush_counter < LCDIF_REPUSH_VSYNCS) {
+        return;
+    }
+    s->vsync_repush_counter = 0;
+    crc = lcdif_crc_guest(s->full_frame_buf, total * 2);
+    if (crc == s->full_frame_crc) {
+        return;
+    }
+    mem = g_malloc(total * 2 + 4);
+    if (address_space_read(&address_space_memory, s->full_frame_buf,
+                           MEMTXATTRS_UNSPECIFIED, mem,
+                           total * 2) != MEMTX_OK) {
+        g_free(mem);
+        return;
+    }
+    /* re-stream the full frame through the panel as a RAMWR stream */
+    s->col_start = 0;
+    s->col_end = ILI9805_NATIVE_WIDTH - 1;
+    s->page_start = 0;
+    s->page_end = ILI9805_NATIVE_HEIGHT - 1;
+    s->gram_x = s->col_start;
+    s->gram_y = s->page_start;
+    s->write_active = true;
+    for (uint32_t i = 0; i < total; i++) {
+        panel_word(s, lduw_le_p(&mem[i * 2]), true);
+    }
+    g_free(mem);
+    s->full_frame_crc = crc;
+    if (s->dirty) {
+        panel_invalidate(s);
+    }
+    qemu_log_mask(LOG_TRACE,
+                  "lcdif: VSYNC re-push full frame buf=0x%" HWADDR_PRIx
+                  " (framebuffer changed)\n",
+                  s->full_frame_buf);
 }
 
 /* a CPU/DMA transfer sequence completed */
@@ -315,6 +414,15 @@ static void lcdif_run_master(MxsLcdifPriv *s)
         uint16_t bus_word = lduw_le_p(&mem[done * 2]);
         panel_word(s, bus_word, is_data);
         done++;
+    }
+
+    /* remember the full framebuffer for the VSYNC dirty re-push
+     * (only a full-frame push establishes the framebuffer base) */
+    if (total == (uint32_t)(ILI9805_NATIVE_WIDTH *
+                            ILI9805_NATIVE_HEIGHT)) {
+        s->full_frame_buf = buf;
+        s->full_frame_crc = lcdif_crc_host(mem, total * 2);
+        s->vsync_repush_counter = 0;
     }
     g_free(mem);
 
@@ -632,6 +740,9 @@ static void lcdif_reset(DeviceState *dev)
     s->gram_x = s->gram_y = 0;
     s->pixel_fmt = 0x55;   /* 16bpp */
     s->write_active = false;
+    s->full_frame_buf = 0;
+    s->full_frame_crc = 0;
+    s->vsync_repush_counter = 0;
     memset(s->gram, 0, sizeof(uint16_t) * ILI9805_NATIVE_WIDTH *
            ILI9805_NATIVE_HEIGHT);
     s->dirty = false;

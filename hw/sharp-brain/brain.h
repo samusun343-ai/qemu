@@ -250,6 +250,20 @@ struct MxsLcdifPriv {
      * completion would set). */
     QEMUTimer *vsync_timer;
 
+    /* Last master-mode frame (for the VSYNC dirty re-push): the
+     * shell draws desktop content into the framebuffer directly and
+     * the driver only pushes on present, so a frame can be drawn
+     * after the driver's last push and never reach the panel.  The
+     * model tracks the FULL framebuffer (from the full-frame push)
+     * and, on VSYNC, re-checks it; if it changed since it was
+     * pushed, the full frame is re-pushed so the console tracks the
+     * framebuffer.  (Tracking only the last pushed region is not
+     * enough: the last push is often the small menu-bar strip while
+     * the icons land in the main area.) */
+    hwaddr full_frame_buf;
+    uint32_t full_frame_crc;
+    int vsync_repush_counter;
+
     /* debug: remaining DATA writes to log after a RAMWR */
     int dbg_data_log;
 };
