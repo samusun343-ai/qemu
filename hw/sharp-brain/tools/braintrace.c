@@ -19,16 +19,16 @@
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static FILE *out;
-static uint64_t lo = 0, hi = 0;
-static uint64_t mlo = 0, mhi = 0;
-static uint64_t rlo[4] = {0, 0, 0, 0};
-static uint64_t rhi[4] = {0, 0, 0, 0};
-static int nranges = 0;
+static uint64_t lo, hi;
+static uint64_t mlo, mhi;
+static uint64_t rlo[4];
+static uint64_t rhi[4];
+static int nranges;
 static uint64_t regvas[24];
-static int nregvas = 0;
-static int dumpmem = 0;
+static int nregvas;
+static int dumpmem;
 static uint64_t dumpvas[24];
-static int ndumpvas = 0;
+static int ndumpvas;
 static uint64_t nevents;
 static uint64_t maxevents = 40000000;
 static GMutex lock;
@@ -109,12 +109,15 @@ static void vcpu_tb_exec_regs(unsigned int cpu_index, void *udata)
         uint64_t r5 = reg_of(regs, "r5");
         uint64_t r8 = reg_of(regs, "r8");
         dump_mem(s, "stk", sp, 0x40);
-        if (r2) { dump_mem(s, "r2buf", r2, 0x40); }
+        if (r2) {
+            dump_mem(s, "r2buf", r2, 0x40);
+        }
         if (r5) {
             dump_mem(s, "r5buf", r5, 0x40);
             /* SG request: [r5+0x14] = data buffer pointer */
             GByteArray *sg = g_byte_array_sized_new(4);
-            if (qemu_plugin_read_memory_vaddr(r5 + 0x14, sg, 4) && sg->len == 4) {
+            if (qemu_plugin_read_memory_vaddr(r5 + 0x14, sg, 4) &&
+                sg->len == 4) {
                 uint64_t pbuf = 0;
                 memcpy(&pbuf, sg->data, 4);
                 if (pbuf > 0x10000) {
@@ -123,7 +126,9 @@ static void vcpu_tb_exec_regs(unsigned int cpu_index, void *udata)
             }
             g_byte_array_unref(sg);
         }
-        if (r8) { dump_mem(s, "r8buf", r8, 0x40); }
+        if (r8) {
+            dump_mem(s, "r8buf", r8, 0x40);
+        }
         for (int k = 0; k < ndumpvas; k++) {
             char lb[16];
             snprintf(lb, sizeof(lb), "v%d", k);
@@ -223,14 +228,18 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
             int idx = tokens[0][1] - '0';
             if (idx >= 0 && idx < 4) {
                 rlo[idx] = strtoull(tokens[1], NULL, 0);
-                if (idx >= nranges) { nranges = idx + 1; }
+                if (idx >= nranges) {
+                    nranges = idx + 1;
+                }
             }
         } else if (g_str_has_prefix(tokens[0], "r") &&
                    g_str_has_suffix(tokens[0], "hi")) {
             int idx = tokens[0][1] - '0';
             if (idx >= 0 && idx < 4) {
                 rhi[idx] = strtoull(tokens[1], NULL, 0);
-                if (idx >= nranges) { nranges = idx + 1; }
+                if (idx >= nranges) {
+                    nranges = idx + 1;
+                }
             }
         } else if (g_strcmp0(tokens[0], "dumpvas") == 0) {
             g_auto(GStrv) items = g_strsplit(tokens[1], ",", 24);
