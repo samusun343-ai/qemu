@@ -390,7 +390,7 @@ still running, and CUR/NEXT_BUF are not read during DMA pushes, so
 the gap is benign for this driver.  Re-check at boot with a trace
 counting LCDIF IRQ assertions vs APBH IRQ 86 before changing it.
 
-### I2C master address form (2026-11-12, fix in `i2c.c`, unpushed)
+### I2C master address form (2026-11-12, fix in `i2c.c`, pushed as 659eeec5)
 
 `i2c_run()` passed the 8-bit address byte straight to QEMU's I2C
 core, which matches slaves by 7-bit address - every in-tree master
@@ -472,9 +472,70 @@ a raw-touch helper driver.
   through driver timeout paths; only a handful of SSP IRQ 96 pulses
   per boot).  Improving IRQ fidelity should speed the WinCE storage
   stack up considerably.
-* EBOOT's `LoadBootCFG / ResetDefaultBootCFG` flash errors (no
-  GPMI/NAND model) - EBOOT falls back to compiled-in defaults that
-  match the dump.
+* EBOOT's `LoadBootCFG / ResetDefaultBootCFG` flash errors - a
+  GPMI/NAND model exists (85bf0e69), but the NAND boot-config content
+  is not part of the eMMC image, so EBOOT falls back to compiled-in
+  defaults that match the dump.
+
+## Kernel walker / page daemon analysis (2026-11)
+
+After the full driver-init sequence completes (all DSK regions
+mounted, the FSD mount chain reading at ~110 requests/s), the
+guest spends most of its time in one kernel page-table walk
+function (braintrace profile: 99.8% of TB executions):
+
+    walk at VA 0x800712cc (nk.exe, PA = VA - 0x40000000),
+    called from 0x80078774:
+        while (count) {
+            if (bank[sel].flags_0x100 & 0x20) {   // "in transition"
+                pager_wait(10);                  // 0x8006abc4
+                if (--budget100k == 0) return 1; // caller retries
+            } else {
+                *dest++ = bank[sel].field_0x90;  // fill page table
+                count -= 4;
+            }
+        }
+
+`bank[]` is the four per-2MB-DRAM-bank descriptor pointers at
+0x80010678 -> 0xB0010000 + n*0x12000 (uncached PA 0x40010000).
+The fill is called from a 7-argument kernel function at
+0x800786d8 (the VirtualAlloc/Commit path) with 256 KB regions
+inside the 8 MB GDI video heap (targets observed at PA
+0x40340000 and 0x40680000), driven by a user-mode DLL at
+~0x78870780 (GWES / the display driver looping over
+video-memory allocations).
+
+`pager_wait` (0x8006abc4) opens kernel object 0x80001C00 and
+spins with IRQs disabled until the object's progress counter
+at +0xC0 passes old+10.  The writer side is the kernel page
+daemon, body at VA 0x80083b14..0x80083bb4:
+
+    str fp, [obj+0xC0]   ; 0x80083b70: the progress counter
+    str sb, [obj+0xD0]   ; 0x80083b78
+    str sl, [obj+0x100]  ; 0x80083ba4: the bank flags word
+    str r8, [obj+0x110]  ; 0x80083bb4
+
+The daemon itself first waits on two handshakes ([obj+0x50]
+bit 0x10000000 clear, 0x80083b24; [obj+0x120] bit 31 clear,
+0x80083b88).  braintrace probes at 0x80083b24 / 0x80083b88 got
+ZERO hits in 150 s: the daemon never even reaches its own spin
+loop - it is starved while the walker spins with IRQs disabled,
+yet the system still creeps forward (~1 walker retry per 5 s
+tick), so something else occasionally advances the wait (other
+[obj+0xC0] writers: 0x8007c3ec writes 0x400, 0x80080c28 sets
+bit 31).  Open questions: whether the "in transition" flag is
+left over from a cache/TLB maintenance operation that QEMU
+short-circuits (ARM926 cache ops are NOPs in QEMU), and which
+object the other writers belong to.
+
+Note (2026-11-13): this behaviour was originally logged as the
+display blocker ("the screen never progresses").  That is
+superseded - the missing step was the surface->fb present,
+fixed by the PXP data path (`misc.c`); the console now shows
+the first-time setup screen clean and upright.  The
+walker/daemon behaviour above remains a leading thread for the
+home-screen activation issue (the Brain home items do not
+activate; driver ISTs do not run).
 
 ## References
 
