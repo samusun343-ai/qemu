@@ -1,5 +1,6 @@
 /*
- * i.MX28 misc blocks: DIGCTL, CLKCTRL, POWER, OCOTP, LRADC stubs.
+ * i.MX28 misc blocks: DIGCTL, CLKCTRL, POWER, OCOTP, EMI, USB PHY,
+ * PWM and PXP, plus generic stmp register files.
  *
  * Copyright (c) 2025 samusun343-ai
  *
@@ -295,8 +296,9 @@ static void pxp_process(hwaddr next)
             drow[x] = srow[y];
         }
     }
-    fprintf(stderr, "pxp: blit src=0x%08x dst=0x%08x (800x480 -> 480x800 CW, stride 1600)\n",
-            src_pa, dst_pa);
+    qemu_log("pxp: blit src=0x%08x dst=0x%08x "
+             "(800x480 -> 480x800 CW, stride 1600)\n",
+             src_pa, dst_pa);
 }
 
 static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
