@@ -79,34 +79,26 @@ static void panel_invalidate(MxsLcdifPriv *s)
     }
 }
 
-/* advance the GRAM write position following the panel addressing rules */
+/*
+ * Advance the GRAM write position.
+ *
+ * The address counter always walks the CASET (column) coordinate first
+ * and wraps into the PASET (page) coordinate - for the Brain firmware
+ * this holds in both MAC modes (verified against the WinCE display
+ * driver's push pattern, see the geometry comment above
+ * lcdif_gfx_update).  MV only changes how the panel scans the GRAM out
+ * to the glass, which the console side models separately.
+ */
 static void panel_advance(MxsLcdifPriv *s)
 {
-    bool mv = s->mac & MAC_MV;
-
-    if (!mv) {
-        /* horizontal writing: X within column window, then Y */
-        if (s->gram_x < s->col_end) {
-            s->gram_x++;
-        } else {
-            s->gram_x = s->col_start;
-            if (s->gram_y < s->page_end) {
-                s->gram_y++;
-            } else {
-                s->gram_y = s->page_start;
-            }
-        }
+    if (s->gram_x < s->col_end) {
+        s->gram_x++;
     } else {
-        /* vertical (transposed) writing */
+        s->gram_x = s->col_start;
         if (s->gram_y < s->page_end) {
             s->gram_y++;
         } else {
             s->gram_y = s->page_start;
-            if (s->gram_x < s->col_end) {
-                s->gram_x++;
-            } else {
-                s->gram_x = s->col_start;
-            }
         }
     }
 }
@@ -152,6 +144,11 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
         s->last_cmd = val16 & 0xff;
         s->cmd_pos = 0;
         s->write_active = false;
+        qemu_log_mask(LOG_TRACE,
+                      "brain-panel: CMD 0x%02x (mac=0x%02x win x[%u..%u] "
+                      "y[%u..%u] pos %u,%u)\n", s->last_cmd, s->mac,
+                      s->col_start, s->col_end, s->page_start, s->page_end,
+                      s->gram_x, s->gram_y);
         switch (s->last_cmd) {
         case ILI9805_SLPOUT:
             s->panel_on = true;
@@ -165,11 +162,6 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             /* reset to window start */
             s->gram_x = s->col_start;
             s->gram_y = s->page_start;
-            qemu_log_mask(LOG_TRACE,
-                          "lcdif: RAMWR start col %u..%u page %u..%u mac=0x%02x\n",
-                          s->col_start, s->col_end,
-                          s->page_start, s->page_end, s->mac);
-            s->dbg_data_log = 16;
             break;
         default:
             break;
@@ -181,12 +173,11 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
     switch (s->last_cmd) {
     case ILI9805_MAC:
         s->mac = val16 & 0xff;
-        qemu_log_mask(LOG_TRACE, "lcdif: MAC=0x%02x (MX=%d MY=%d MV=%d BGR=%d)\n",
-                      s->mac, !!(s->mac & MAC_MX), !!(s->mac & MAC_MY),
-                      !!(s->mac & MAC_MV), !!(s->mac & MAC_BGR));
+        qemu_log_mask(LOG_TRACE, "brain-panel: MAC = 0x%02x\n", s->mac);
         break;
     case ILI9805_PIXFMT:
         s->pixel_fmt = val16 & 0xff;
+        qemu_log_mask(LOG_TRACE, "brain-panel: PIXFMT = 0x%02x\n", s->pixel_fmt);
         break;
     case ILI9805_CASET:
         if (s->cmd_pos < 4) {
@@ -196,9 +187,8 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             s->col_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->col_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
             s->gram_x = s->col_start;
-            qemu_log_mask(LOG_TRACE,
-                          "lcdif: CASET col %u..%u (mac=0x%02x)\n",
-                          s->col_start, s->col_end, s->mac);
+            qemu_log_mask(LOG_TRACE, "brain-panel: CASET %u..%u\n",
+                          s->col_start, s->col_end);
         }
         break;
     case ILI9805_PASET:
@@ -209,9 +199,8 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             s->page_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->page_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
             s->gram_y = s->page_start;
-            qemu_log_mask(LOG_TRACE,
-                          "lcdif: PASET page %u..%u (mac=0x%02x)\n",
-                          s->page_start, s->page_end, s->mac);
+            qemu_log_mask(LOG_TRACE, "brain-panel: PASET %u..%u\n",
+                          s->page_start, s->page_end);
         }
         break;
     default:
@@ -382,11 +371,11 @@ static void lcdif_run_master(MxsLcdifPriv *s)
     uint8_t *mem;
 
     qemu_log_mask(LOG_TRACE,
-                  "lcdif: RUN master H=%u V=%u total=%u buf=0x%" HWADDR_PRIx
-                  " is_data=%d mac=0x%02x win col %u..%u page %u..%u\n",
+                  "brain-lcdif: master run: count=%ux%u total=%u "
+                  "cur_buf=0x%08x next_buf=0x%08x data=%d ctrl=0x%08x\n",
                   (s->transfer_count >> 16) & 0xffff,
-                  s->transfer_count & 0xffff, total, buf, is_data, s->mac,
-                  s->col_start, s->col_end, s->page_start, s->page_end);
+                  s->transfer_count & 0xffff, total, (uint32_t)buf,
+                  s->next_buf, is_data, s->ctrl);
 
     if (total == 0) {
         lcdif_transfer_done(s);
@@ -401,14 +390,6 @@ static void lcdif_run_master(MxsLcdifPriv *s)
         lcdif_transfer_done(s);
         return;
     }
-
-    qemu_log_mask(LOG_TRACE,
-                  "lcdif: master pixels[0..7] = %04x %04x %04x %04x "
-                  "%04x %04x %04x %04x\n",
-                  lduw_le_p(&mem[0]), lduw_le_p(&mem[2]),
-                  lduw_le_p(&mem[4]), lduw_le_p(&mem[6]),
-                  lduw_le_p(&mem[8]), lduw_le_p(&mem[10]),
-                  lduw_le_p(&mem[12]), lduw_le_p(&mem[14]));
 
     while (done < total) {
         uint16_t bus_word = lduw_le_p(&mem[done * 2]);
@@ -454,12 +435,6 @@ static void lcdif_cpu_data(MxsLcdifPriv *s, uint32_t val)
 {
     bool is_data = s->ctrl & BM_CTRL_DATA_SELECT;
 
-    if (s->dbg_data_log > 0) {
-        qemu_log_mask(LOG_TRACE,
-                      "lcdif: DATA w=0x%08x lo=0x%04x hi=0x%04x is_data=%d\n",
-                      val, val & 0xffff, (val >> 16) & 0xffff, is_data);
-        s->dbg_data_log--;
-    }
     panel_word(s, val & 0xffff, is_data);
 
     if (s->ctrl & BM_CTRL_RUN) {
@@ -618,9 +593,27 @@ static const MemoryRegionOps lcdif_ops = {
 /* ------------------------------------------------------------------ */
 
 /*
- * The console shows the landscape (rotated) view.  The panel stores
- * pixels in native (portrait) orientation; transpose for display when
- * the panel is in transposed (MV) mode.
+ * The console shows the device (landscape) view.
+ *
+ * Geometry (reverse engineered from the WinCE display driver's actual
+ * register traffic, see README):
+ *
+ *   - the framebuffer is a portrait 480(x=CASET) x 854(y=PASET) image
+ *     streamed row-major: the address counter walks CASET first, so one
+ *     framebuffer row is one display column of the landscape UI;
+ *   - the panel glass is 480x854 and is mounted rotated 90 degrees in
+ *     the Brain case, so the panel's Y axis (854) is the device's
+ *     horizontal axis;
+ *   - with the firmware's MAC = MX|MY|MV (0xd0) the GRAM is written
+ *     mirrored on both native axes (panel_pixel);
+ *   - the mounting rotation maps device (x, y) to GRAM (853-x, y),
+ *     i.e. console(x, y) = GRAM[853-x][y]: the portrait GRAM rotates
+ *     counter-clockwise into the landscape console.  This direction
+ *     is VERIFIED, not derived: the EBOOT splash reads upright with
+ *     it and the menu bar sits on the right edge (x = 800..853).
+ *     The opposite choice (GRAM[853-x][479-y]) shows the screen
+ *     upside down.  The transform is constant - it only depends on
+ *     how the panel is glued into the case.
  */
 static bool lcdif_gfx_update(void *opaque)
 {
@@ -638,26 +631,9 @@ static bool lcdif_gfx_update(void *opaque)
     for (int y = 0; y < h; y++) {
         uint32_t *row = (uint32_t *)(dest + y * stride);
         for (int x = 0; x < w; x++) {
-            /*
-             * Always rotate the portrait GRAM 90 deg CW into the
-             * landscape console.  The panel is physically mounted
-             * rotated in the Brain and the guest framebuffer is a
-             * portrait (480x854) image (verified: the framebuffer
-             * at 0x40100000 renders upright text when rotated CW,
-             * menu bar on the left).  The MAC MV bit only changes
-             * how the incoming pixel stream is addressed into GRAM
-             * (panel_advance); it does not change the physical
-             * mounting, so gating the rotation on MV showed a
-             * cropped, sheared view of the portrait image.
-             * GRAM (nx: 0..479, ny: 0..853) -> console (x: 0..853,
-             * y: 0..479): nx = y, ny = HEIGHT-1-x.
-             */
             int nx = y;
             int ny = ILI9805_NATIVE_HEIGHT - 1 - x;
-            uint16_t rgb = (nx < ILI9805_NATIVE_WIDTH &&
-                            ny < ILI9805_NATIVE_HEIGHT)
-                ? s->gram[ny * ILI9805_NATIVE_WIDTH + nx]
-                : 0;
+            uint16_t rgb = (nx >= 0 && ny >= 0) ? s->gram[ny * ILI9805_NATIVE_WIDTH + nx] : 0;
             int r = ((rgb >> 11) & 0x1f) << 3;
             int g = ((rgb >> 5) & 0x3f) << 2;
             int b = (rgb & 0x1f) << 3;
@@ -688,15 +664,16 @@ int mxs_lcdif_dma_data(MxsLcdifPriv *s, bool to_device,
     bool is_data = s->ctrl & BM_CTRL_DATA_SELECT;
     uint8_t *mem;
 
+    qemu_log_mask(LOG_TRACE,
+                  "brain-lcdif: dma %s len=%u at 0x%08x data=%d ctrl=0x%08x "
+                  "xfer=0x%08x\n", to_device ? "push" : "pull", len,
+                  (uint32_t)bufaddr, is_data, s->ctrl, s->transfer_count);
+
     if (!to_device) {
         return 0;
     }
 
     /* memory -> panel data push (smart LCD mode) */
-    qemu_log_mask(LOG_TRACE,
-                  "lcdif: DMA push len=%u is_data=%d mac=0x%02x col %u..%u page %u..%u\n",
-                  len, is_data, s->mac,
-                  s->col_start, s->col_end, s->page_start, s->page_end);
     mem = g_malloc(len);
     if (address_space_read(&address_space_memory, bufaddr,
                            MEMTXATTRS_UNSPECIFIED, mem, len) != MEMTX_OK) {
