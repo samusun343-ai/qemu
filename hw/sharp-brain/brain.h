@@ -368,6 +368,7 @@ typedef void MxsGpioOutNotify(void *opaque, int bank, uint32_t out);
 void mxs_pinctrl_set_output_hook(DeviceState *dev, MxsGpioOutNotify fn,
                                   void *opaque);
 uint32_t mxs_pinctrl_get_output(DeviceState *dev, int bank);
+uint32_t mxs_pinctrl_get_doe(DeviceState *dev, int bank);
 
 /* ------------------------------------------------------------------ */
 /* GPIO matrix keyboard (hw/sharp-brain/brain-kbd.c)                  */
@@ -414,7 +415,8 @@ struct BrainKbdState {
     char *layout_name;          /* board layout property */
     const BrainKbdLayout *layout;
 
-    uint32_t col_out[5];        /* GPIO bank effective outputs (DOUT&DOE) */
+    uint32_t row_out;           /* GPIO4 effective output (DOUT&DOE) */
+    uint32_t row_doe;           /* GPIO4 output-enable: rows the guest drives */
     uint64_t pressed;           /* bitmask: bit = row * BRAIN_KBD_COLS + col */
     unsigned int ctrl_held;     /* host Ctrl keys currently down */
 };

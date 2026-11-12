@@ -48,7 +48,16 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * Physical matrix (row, col), from linux-brain imx28-pwsh6.dts:
+ * Physical matrix (row, col), from linux-brain imx28-pwsh6.dts.
+ * The (row, col) key table is the same, but the SCAN DIRECTION is
+ * the opposite of the first guess: the guest drives the ROWS and
+ * reads the COLUMNS.  Proven by the guest's own GPIO programming
+ * (boottest16 trace): the KBD driver configures GPIO4_0..4_7 as
+ * outputs (DOE set, DOUT low) and arms PINCTRL interrupts on the
+ * columns GPIO2_16..2_21 + GPIO4_8 (PIN2IRQ/IRQLEV/IRQPOL/IRQEN),
+ * i.e. a column going low (key pressed, row driven low) is the
+ * interrupt source.  The columns are pulled up on the board, so
+ * they idle high; a pressed key pulls its column low.
  *
  *        col0     col1     col2      col3     col4     col5    col6
  *  row0  V        H        Y         戻る     C        D       (Home)
@@ -60,7 +69,8 @@
  *  row6  Minus    L        R         Space    音声     S       英和
  *  row7  -        -        -         -        -        -       -
  *
- * col0..col5 = GPIO2_16..GPIO2_21, col6 = GPIO4_8.
+ * rows = GPIO4_0..4_7 (guest-driven outputs).
+ * col0..col5 = GPIO2_16..GPIO2_21, col6 = GPIO4_8 (pulled-up inputs).
  */
 
 #define D BRAIN_KEY_DIRECT
@@ -201,28 +211,41 @@ const BrainKbdLayout *brain_kbd_find_layout(const char *name)
 
 #define CONTACT_BIT(r, c)   (1ULL << ((r) * BRAIN_KBD_COLS + (c)))
 
-/* column c (0..6) is driven low by the guest? */
-static bool brain_kbd_col_low(BrainKbdState *s, int c)
+/* row r is driven low by the guest (output enabled, DOUT clear) */
+static bool brain_kbd_row_low(BrainKbdState *s, int r)
 {
-    if (c < 6) {
-        return !(s->col_out[2] & (1u << (16 + c)));
-    }
-    return !(s->col_out[4] & (1u << 8));
+    return (s->row_doe & (1u << r)) && !(s->row_out & (1u << r));
 }
 
+/*
+ * Recompute the column levels from the pressed contacts: a pressed
+ * key pulls its column low while its row is driven low by the guest;
+ * otherwise the column stays pulled up (high).  Columns are the
+ * inputs the driver reads and arms interrupts on (GPIO2_16..21 for
+ * col0..5, GPIO4_8 for col6).
+ */
 static void brain_kbd_recalc(BrainKbdState *s)
 {
-    uint32_t rows = 0xff;       /* all rows pulled up */
+    uint32_t cols2 = 0x3f0000;   /* columns idle high (pulled up) */
+    uint32_t cols4 = 0x100;
 
     for (int r = 0; r < BRAIN_KBD_ROWS; r++) {
+        if (!brain_kbd_row_low(s, r)) {
+            continue;
+        }
         for (int c = 0; c < BRAIN_KBD_COLS; c++) {
-            if ((s->pressed & CONTACT_BIT(r, c)) && brain_kbd_col_low(s, c)) {
-                rows &= ~(1u << r);
+            if (s->pressed & CONTACT_BIT(r, c)) {
+                if (c < 6) {
+                    cols2 &= ~(1u << (16 + c));
+                } else {
+                    cols4 &= ~(1u << 8);
+                }
             }
         }
     }
 
-    mxs_pinctrl_set_input(s->pinctrl, 4, 0xff, rows);
+    mxs_pinctrl_set_input(s->pinctrl, 2, 0x3f0000, cols2);
+    mxs_pinctrl_set_input(s->pinctrl, 4, 0x100, cols4);
 }
 
 /* pinctrl output hook: the guest re-drove one of the GPIO banks */
@@ -230,10 +253,13 @@ static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
 {
     BrainKbdState *s = opaque;
 
-    if (bank != 2 && bank != 4) {
+    if (bank != 4) {
         return;
     }
-    s->col_out[bank] = out;
+    /* the guest drives the rows on GPIO4_0..7: refresh the row state
+     * (effective output + output-enable) and re-derive the columns */
+    s->row_out = out;
+    s->row_doe = mxs_pinctrl_get_doe(s->pinctrl, bank);
     brain_kbd_recalc(s);
 }
 
@@ -340,10 +366,14 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    /* snapshot the current column drive state, then observe changes */
-    for (int b = 0; b < 5; b++) {
-        s->col_out[b] = mxs_pinctrl_get_output(s->pinctrl, b);
-    }
+    /* snapshot the current row drive state, then observe changes.
+     * The columns are pulled up on the board: drive them high now so
+     * the driver sees idle-high columns (and no phantom interrupt)
+     * when it arms the column IRQs during its init. */
+    s->row_out = mxs_pinctrl_get_output(s->pinctrl, 4);
+    s->row_doe = mxs_pinctrl_get_doe(s->pinctrl, 4);
+    mxs_pinctrl_set_input(s->pinctrl, 2, 0x3f0000, 0x3f0000);
+    mxs_pinctrl_set_input(s->pinctrl, 4, 0x100, 0x100);
     mxs_pinctrl_set_output_hook(s->pinctrl, brain_kbd_col_notify, s);
 
     hs = qemu_input_handler_register(dev, &brain_kbd_handler);

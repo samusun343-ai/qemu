@@ -148,10 +148,22 @@ All mxs register blocks use the 16-byte "stmp" layout
 
 ### Keyboard (PW-SH6 matrix, from linux-brain `imx28-pwsh6.dts`)
 
-8 rows (inputs, GPIO4_0..4_7, pulled up) x 7 columns (outputs:
-GPIO2_16..2_21 + GPIO4_8). Keys map to a standard PC-style map plus a
-`symbols` key (matrix 2,4) that acts as a modifier selecting the
-alternate blue legends (numbers/symbols) - the same trick the real
+8 rows (guest-driven outputs, GPIO4_0..4_7) x 7 columns (inputs,
+GPIO2_16..2_21 + GPIO4_8, pulled up). The scan direction is
+rows-out / columns-in: the driver drives the rows low and arms
+PINCTRL level interrupts on the columns (a pressed key pulls its
+column low). This was proven by tracing the guest's own GPIO
+programming (boottest16): it sets DOE for GPIO4_0..7, drives
+DOUT low, and programs PIN2IRQ/IRQLEV/IRQPOL/IRQEN for
+GPIO2_16..21 + GPIO4_8. The model therefore injects keypresses
+as column levels, and pulls the columns up at realise, so the
+driver sees idle-high columns when it arms the IRQs (without
+the pull-ups the columns read low, the level IRQ fires
+immediately on enable, and the driver tears the IRQs back down
+- which is why host keys were silently ignored before this fix).
+Keys map to a standard PC-style map plus a `symbols` key
+(matrix 2,4) that acts as a modifier selecting the alternate
+blue legends (numbers/symbols) - the same trick the real
 hardware uses.
 
 Host keyboard -> guest mapping policy (per project requirements):

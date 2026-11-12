@@ -63,8 +63,10 @@ typedef struct MxsPinctrlState {
 
 static uint32_t pinctrl_din(MxsPinctrlState *s, int b)
 {
-    /* a pin reads back its driven output when configured as output */
-    return (s->dout[b] & s->doe[b]) | s->ext_input[b];
+    /* a pin reads back its driven output when configured as output,
+     * and the externally driven level (pull-up, key matrix, strap)
+     * only when configured as an input */
+    return (s->dout[b] & s->doe[b]) | (s->ext_input[b] & ~s->doe[b]);
 }
 
 static void pinctrl_update_irq(MxsPinctrlState *s, int b)
@@ -91,8 +93,14 @@ static void pinctrl_update_irq(MxsPinctrlState *s, int b)
         bool pol = !!(s->irqpol[b] & m);
         bool is_level = !!(s->irqlev[b] & m);
         if (is_level) {
+            /* level-sensitive status follows the pin level: it must
+             * clear when the level goes away, or the IRQ would stay
+             * asserted forever after the first low (the keyboard
+             * driver relies on this to deassert after a key release) */
             if (level == pol) {
                 fire |= m;
+            } else {
+                s->irqstat[b] &= ~m;
             }
         } else {
             if (pol && (rising & m)) {
@@ -153,6 +161,17 @@ uint32_t mxs_pinctrl_get_output(DeviceState *dev, int bank)
         return 0;
     }
     return s->dout[bank] & s->doe[bank];
+}
+
+/* public: read the GPIO output-enable state of a bank */
+uint32_t mxs_pinctrl_get_doe(DeviceState *dev, int bank)
+{
+    MxsPinctrlState *s = MXS_PINCTRL(dev);
+
+    if (bank < 0 || bank >= PINCTRL_BANKS) {
+        return 0;
+    }
+    return s->doe[bank];
 }
 
 static uint64_t pinctrl_read(void *opaque, hwaddr addr, unsigned size)
