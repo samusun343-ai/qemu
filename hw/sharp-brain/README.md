@@ -333,17 +333,32 @@ card reads low) and GPIO0_0, and the enumerating driver prints
 `SDHCSlotOptionHandler - SDHCDSetSlotInterfaceEx : Clock Setting:
 52000000` as it switches the slot to 8-bit high-speed timing.
 
-## Display (LCDIF) - transpose fix (2026-11-12)
+## Display (LCDIF) - portrait framebuffer, always rotate CW (2026-11-12)
 
-`lcdif_gfx_update()` mapped the landscape console from the portrait
-GRAM with `ny = ILI9805_NATIVE_WIDTH - 1 - x`.  The panel-Y coordinate
-spans the native *height* (854), so every display column x >= 480
-clamped to GRAM row 0: only 230400 of the 409920 GRAM pixels were ever
-visible and the right ~44% of the screen repeated a single row (the
-"top strip only" symptom).  Fixed to `ILI9805_NATIVE_HEIGHT - 1 - x`;
-the mapping is now a bijection over the whole frame.  Verified by
-enumerating the mapping (old: 230400 distinct pixels, new: 409920);
-a full boot check against the eMMC image is still pending.
+The guest framebuffer at 0x40100000 is a **portrait (480x854)**
+image, not landscape.  Evidence (2026-11-12, QMP `pmemsave` + boot
+trace): the framebuffer renders upright text and a left-hand menu
+bar when rotated 90 deg CW; the guest programs MAC=0xd0 (MX=1 MY=1
+**MV=0**), CASET 0..479, PASET 0..853 and pushes frames through the
+LCDIF master path (`RUN master H=<rows> V=480`, chunks of 800 then
+54 rows; no APBH DMA is used for these pushes).  The earlier code
+gated the 90-degree rotation on the MAC MV bit, so with MV=0 the
+console showed the portrait image identity-mapped: cropped and
+diagonally sheared (the "top strip only" / ~45 deg shear symptom,
+EBOOT splash and desktop alike).  The MV bit only changes how the
+incoming pixel stream is addressed into GRAM (`panel_advance`); it
+does not change the physical mounting, so `lcdif_gfx_update()` now
+always rotates the portrait GRAM 90 deg CW into the landscape
+console (`nx = y`, `ny = 854-1-x`).  Verified: the EBOOT "Brain"
+splash renders upright and readable; the desktop is re-verified with
+each boot.
+
+The first transpose bug (2026-11-12, same function) is fixed the
+same way: the panel-Y coordinate spans the native *height* (854),
+not the width; using the width mapped every display column x >= 480
+to GRAM row 0 (only 230400 of 409920 pixels visible, right ~44%
+repeating one row).  The mapping is now a bijection over the whole
+frame (enumerated: 409920 distinct pixels).
 
 Open question, not changed yet: a frame pushed through APBH DMA
 channel 13 (`mxs_lcdif_dma_data`) never raises the LCDIF

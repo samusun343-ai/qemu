@@ -241,6 +241,9 @@ struct MxsLcdifPriv {
 
     /* console geometry (landscape view) */
     uint32_t width, height;
+
+    /* debug: remaining DATA writes to log after a RAMWR */
+    int dbg_data_log;
 };
 
 /* DMA channel 13 client */

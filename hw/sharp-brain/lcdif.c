@@ -164,6 +164,11 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             /* reset to window start */
             s->gram_x = s->col_start;
             s->gram_y = s->page_start;
+            qemu_log_mask(LOG_TRACE,
+                          "lcdif: RAMWR start col %u..%u page %u..%u mac=0x%02x\n",
+                          s->col_start, s->col_end,
+                          s->page_start, s->page_end, s->mac);
+            s->dbg_data_log = 16;
             break;
         default:
             break;
@@ -175,6 +180,9 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
     switch (s->last_cmd) {
     case ILI9805_MAC:
         s->mac = val16 & 0xff;
+        qemu_log_mask(LOG_TRACE, "lcdif: MAC=0x%02x (MX=%d MY=%d MV=%d BGR=%d)\n",
+                      s->mac, !!(s->mac & MAC_MX), !!(s->mac & MAC_MY),
+                      !!(s->mac & MAC_MV), !!(s->mac & MAC_BGR));
         break;
     case ILI9805_PIXFMT:
         s->pixel_fmt = val16 & 0xff;
@@ -187,6 +195,9 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             s->col_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->col_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
             s->gram_x = s->col_start;
+            qemu_log_mask(LOG_TRACE,
+                          "lcdif: CASET col %u..%u (mac=0x%02x)\n",
+                          s->col_start, s->col_end, s->mac);
         }
         break;
     case ILI9805_PASET:
@@ -197,6 +208,9 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             s->page_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->page_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
             s->gram_y = s->page_start;
+            qemu_log_mask(LOG_TRACE,
+                          "lcdif: PASET page %u..%u (mac=0x%02x)\n",
+                          s->page_start, s->page_end, s->mac);
         }
         break;
     default:
@@ -249,6 +263,13 @@ static void lcdif_run_master(MxsLcdifPriv *s)
     uint32_t done = 0;
     uint8_t *mem;
 
+    qemu_log_mask(LOG_TRACE,
+                  "lcdif: RUN master H=%u V=%u total=%u buf=0x%" HWADDR_PRIx
+                  " is_data=%d mac=0x%02x win col %u..%u page %u..%u\n",
+                  (s->transfer_count >> 16) & 0xffff,
+                  s->transfer_count & 0xffff, total, buf, is_data, s->mac,
+                  s->col_start, s->col_end, s->page_start, s->page_end);
+
     if (total == 0) {
         lcdif_transfer_done(s);
         return;
@@ -262,6 +283,14 @@ static void lcdif_run_master(MxsLcdifPriv *s)
         lcdif_transfer_done(s);
         return;
     }
+
+    qemu_log_mask(LOG_TRACE,
+                  "lcdif: master pixels[0..7] = %04x %04x %04x %04x "
+                  "%04x %04x %04x %04x\n",
+                  lduw_le_p(&mem[0]), lduw_le_p(&mem[2]),
+                  lduw_le_p(&mem[4]), lduw_le_p(&mem[6]),
+                  lduw_le_p(&mem[8]), lduw_le_p(&mem[10]),
+                  lduw_le_p(&mem[12]), lduw_le_p(&mem[14]));
 
     while (done < total) {
         uint16_t bus_word = lduw_le_p(&mem[done * 2]);
@@ -298,6 +327,12 @@ static void lcdif_cpu_data(MxsLcdifPriv *s, uint32_t val)
 {
     bool is_data = s->ctrl & BM_CTRL_DATA_SELECT;
 
+    if (s->dbg_data_log > 0) {
+        qemu_log_mask(LOG_TRACE,
+                      "lcdif: DATA w=0x%08x lo=0x%04x hi=0x%04x is_data=%d\n",
+                      val, val & 0xffff, (val >> 16) & 0xffff, is_data);
+        s->dbg_data_log--;
+    }
     panel_word(s, val & 0xffff, is_data);
 
     if (s->ctrl & BM_CTRL_RUN) {
@@ -468,7 +503,6 @@ static bool lcdif_gfx_update(void *opaque)
     uint8_t *dest = surface_data(surface);
     int w = surface_width(surface);
     int h = surface_height(surface);
-    bool transposed = s->mac & MAC_MV;
 
     if (surface_bits_per_pixel(surface) != 32) {
         return true;
@@ -477,24 +511,22 @@ static bool lcdif_gfx_update(void *opaque)
     for (int y = 0; y < h; y++) {
         uint32_t *row = (uint32_t *)(dest + y * stride);
         for (int x = 0; x < w; x++) {
-            int nx, ny;
-            if (transposed) {
-                /*
-                 * Landscape display (x: 0..853, y: 0..479) from the
-                 * portrait GRAM (nx: 0..479, ny: 0..853).  The panel
-                 * Y coordinate spans the native HEIGHT (854), not
-                 * the WIDTH: using the width here mapped every
-                 * display column x >= 480 to GRAM row 0, so only
-                 * 230400 of the 409920 GRAM pixels were ever
-                 * visible and the right ~44% of the screen repeated
-                 * a single row.
-                 */
-                nx = y;
-                ny = ILI9805_NATIVE_HEIGHT - 1 - x;
-            } else {
-                nx = x;
-                ny = y;
-            }
+            /*
+             * Always rotate the portrait GRAM 90 deg CW into the
+             * landscape console.  The panel is physically mounted
+             * rotated in the Brain and the guest framebuffer is a
+             * portrait (480x854) image (verified: the framebuffer
+             * at 0x40100000 renders upright text when rotated CW,
+             * menu bar on the left).  The MAC MV bit only changes
+             * how the incoming pixel stream is addressed into GRAM
+             * (panel_advance); it does not change the physical
+             * mounting, so gating the rotation on MV showed a
+             * cropped, sheared view of the portrait image.
+             * GRAM (nx: 0..479, ny: 0..853) -> console (x: 0..853,
+             * y: 0..479): nx = y, ny = HEIGHT-1-x.
+             */
+            int nx = y;
+            int ny = ILI9805_NATIVE_HEIGHT - 1 - x;
             uint16_t rgb = (nx < ILI9805_NATIVE_WIDTH &&
                             ny < ILI9805_NATIVE_HEIGHT)
                 ? s->gram[ny * ILI9805_NATIVE_WIDTH + nx]
@@ -534,6 +566,10 @@ int mxs_lcdif_dma_data(MxsLcdifPriv *s, bool to_device,
     }
 
     /* memory -> panel data push (smart LCD mode) */
+    qemu_log_mask(LOG_TRACE,
+                  "lcdif: DMA push len=%u is_data=%d mac=0x%02x col %u..%u page %u..%u\n",
+                  len, is_data, s->mac,
+                  s->col_start, s->col_end, s->page_start, s->page_end);
     mem = g_malloc(len);
     if (address_space_read(&address_space_memory, bufaddr,
                            MEMTXATTRS_UNSPECIFIED, mem, len) != MEMTX_OK) {
