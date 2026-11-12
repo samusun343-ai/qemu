@@ -62,8 +62,9 @@
 #define ILI9805_SLPOUT        0x11
 #define ILI9805_DISPON        0x29
 
-#define MAC_MX   (1u << 7)
-#define MAC_MY   (1u << 6)
+#define MAC_GS   (1u << 0)
+#define MAC_MX   (1u << 6)
+#define MAC_MY   (1u << 7)
 #define MAC_MV   (1u << 5)
 #define MAC_BGR  (1u << 3)
 
