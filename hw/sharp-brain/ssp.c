@@ -134,6 +134,16 @@ static void mxs_ssp_irq_update(MxsSspState *s)
 
 static void mxs_ssp_fill_fifo(MxsSspState *s);
 
+/*
+ * NOTE (2026-11-12): a read-completion edge was tried here (raising
+ * CTRL1_RECV_TIMEOUT_IRQ when a read data phase ends, so the sdhc IST
+ * would not have to notice completion by timeout polling). It was
+ * reverted: the edge stalls the boot in ~1 of 3 runs (serial stuck at
+ * the SD device load, virtual clock frozen — a lost-wakeup race with
+ * the driver's wait). The driver works reliably with timeout polling,
+ * so the edge is dropped until the race is understood. See the commit
+ * message for the test evidence (boottest63/65/66).
+ */
 static void mxs_ssp_execute(MxsSspState *s)
 {
 
@@ -145,7 +155,8 @@ static void mxs_ssp_execute(MxsSspState *s)
     req.arg = s->cmd1;
     req.crc = 0;
 
-    qemu_log_mask(LOG_TRACE, "mxs-ssp%d: CMD%d arg 0x%08x (ctrl0 0x%08x)\n", s->id,
+    qemu_log_mask(LOG_TRACE, "mxs-ssp%d: [@%u] CMD%d arg 0x%08x (ctrl0 0x%08x)\n", s->id,
+                  (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000),
                   req.cmd, req.arg, s->ctrl0);
 
     if (!sdbus_get_inserted(&s->sdbus)) {
@@ -338,9 +349,11 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
         res = address_space_write(&address_space_memory, bufaddr,
                                   MEMTXATTRS_UNSPECIFIED, buf, n);
         qemu_log_mask(LOG_TRACE,
-                      "mxs-ssp%d: dma read done n=%u from_fifo=%u "
-                      "first=%02x%02x%02x%02x fifo_level=%u\n", s->id, n,
-                      from_fifo, buf[0], buf[1], buf[2], buf[3], s->fifo_level);
+                      "mxs-ssp%d: [@%u] dma read done n=%u from_fifo=%u "
+                      "first=%02x%02x%02x%02x fifo_level=%u\n", s->id,
+                      (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000),
+                      n, from_fifo, buf[0], buf[1], buf[2], buf[3],
+                      s->fifo_level);
         if (s->data_remaining == 0 && s->fifo_level == 0) {
             s->status &= ~STATUS_DATA_BUSY;
         } else if (s->data_remaining == 0) {
@@ -422,6 +435,10 @@ static uint64_t mxs_ssp_read(void *opaque, hwaddr addr, unsigned size)
     }
     case SSP_DLL_STS:
         return (1 << 1);        /* REF lock */
+    case SSP_DDR_CTRL:
+        return s->ddr_ctrl;
+    case SSP_DLL_CTRL:
+        return s->dll_ctrl;
     case SSP_VERSION:
         return s->version;
     default:
@@ -559,6 +576,27 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         /* writing 1s clears the error/status bits */
         s->status &= ~value;
         return;
+    case SSP_DDR_CTRL:
+        /* DDR control: the guest writes 0 to run in SDR mode (no DDR).
+         * Stored read-as-written; the SSP model is SDR-only, so there
+         * is no DDR side effect to apply. */
+        switch (off) {
+        case 0:  s->ddr_ctrl = value; break;
+        case 4:  s->ddr_ctrl |= value; break;
+        case 8:  s->ddr_ctrl &= ~value; break;
+        case 12: s->ddr_ctrl ^= value; break;
+        }
+        return;
+    case SSP_DLL_CTRL:
+        /* DLL control: stored read-as-written; the model has no DLL
+         * to tune, so there is no side effect. */
+        switch (off) {
+        case 0:  s->dll_ctrl = value; break;
+        case 4:  s->dll_ctrl |= value; break;
+        case 8:  s->dll_ctrl &= ~value; break;
+        case 12: s->dll_ctrl ^= value; break;
+        }
+        return;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "mxs-ssp%d: unimplemented write 0x%" HWADDR_PRIx
@@ -590,6 +628,7 @@ static void mxs_ssp_reset(DeviceState *dev)
     s->ctrl1 = 0;
     s->status = 0;
     s->ddr_ctrl = 0;
+    s->dll_ctrl = 0;
     memset(s->sdresp, 0, sizeof(s->sdresp));
     s->fifo_level = 0;
     s->data_remaining = 0;

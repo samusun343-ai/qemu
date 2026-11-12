@@ -200,7 +200,7 @@ struct MxsSspState {
     uint8_t id;                 /* 0..3, for trace messages */
 
     uint32_t ctrl0, cmd0, cmd1, xfer_size, block_size;
-    uint32_t compref, compmask, timing, ctrl1, status, ddr_ctrl;
+    uint32_t compref, compmask, timing, ctrl1, status, ddr_ctrl, dll_ctrl;
     uint32_t sdresp[4];
     uint32_t version;
 
