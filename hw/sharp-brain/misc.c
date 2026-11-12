@@ -28,6 +28,8 @@
 #include "qemu/timer.h"
 #include "hw/core/irq.h"
 #include "system/runstate.h"
+#include "system/address-spaces.h"
+#include "system/memory.h"
 #include "brain.h"
 
 typedef struct MxsMiscState {
@@ -194,6 +196,86 @@ static uint64_t mxs_misc_read(void *opaque, hwaddr addr, unsigned size)
     }
 }
 
+/*
+ * PXP data path. The guest's display driver programs the PXP by writing
+ * a register set to RAM and pointing HW_PXP_NEXT at it. The register set
+ * (observed live via TEMP-DIAG, boottest163, 14 identical blits) is a
+ * packed 32-bit-word struct:
+ *   [+0x000] CTRL (0x84147), [+0x004] OUT_BUF (dest PA),
+ *   [+0x010] PS_BUF (source PA), [+0x028] PS_SCALE = 0x10001000 (1.0).
+ * The driver copies the 800x480 landscape GDI surface to a 480x800
+ * portrait combine buffer. The LCDIF console transform is
+ * console(x,y) = GRAM[853-x][y], so for the console to show the surface
+ * upright the combine buffer must hold combine[r][c] = surface(799-r, c)
+ * (90 deg CCW). RGB565, source stride 1600, dest stride 960. The RECT
+ * is ignored (a full-surface copy is always correct; the RECT only
+ * selects which tiles are dirty).
+ */
+static bool pxp_read_guest(hwaddr buf, uint8_t *out, uint32_t len)
+{
+    uint32_t off = 0;
+
+    while (off < len) {
+        MemoryRegionSection sec = memory_region_find(get_system_memory(),
+                                                     buf + off,
+                                                     len - off);
+        if (!sec.mr || !memory_region_is_ram(sec.mr) || sec.size == 0) {
+            return false;
+        }
+        if (sec.size > len - off) {
+            sec.size = len - off;
+        }
+        uint8_t *host = memory_region_get_ram_ptr(sec.mr);
+        memcpy(out + off, host + sec.offset_within_region, sec.size);
+        off += sec.size;
+    }
+    return true;
+}
+
+/* Host pointer for a guest-RAM range, or NULL if it is not a single
+ * RAM region (same direct-RAM access lcdif_read_guest uses). */
+static uint8_t *pxp_host_ptr(hwaddr pa, uint32_t len)
+{
+    MemoryRegionSection sec = memory_region_find(get_system_memory(), pa,
+                                                 len);
+    if (!sec.mr || !memory_region_is_ram(sec.mr) || sec.size < len) {
+        return NULL;
+    }
+    return memory_region_get_ram_ptr(sec.mr) + sec.offset_within_region;
+}
+
+static void pxp_process(hwaddr next)
+{
+    uint8_t set[0x100];
+    uint32_t src_pa, dst_pa;
+    uint8_t *src, *dst;
+    int x, y;
+
+    if (!pxp_read_guest(next, set, sizeof(set))) {
+        return;
+    }
+    memcpy(&dst_pa, set + 0x004, 4);
+    memcpy(&src_pa, set + 0x010, 4);
+    if (!dst_pa || !src_pa) {
+        return;
+    }
+    src = pxp_host_ptr(src_pa, 800 * 480 * 2);
+    dst = pxp_host_ptr(dst_pa, 480 * 800 * 2);
+    if (!src || !dst) {
+        return;
+    }
+    /* 90 deg CCW: dest(row y, col x) = src(x_s = 799-y, y_s = x). */
+    for (y = 0; y < 800; y++) {
+        uint16_t *drow = (uint16_t *)(dst + y * 960);
+        for (x = 0; x < 480; x++) {
+            uint16_t *srow = (uint16_t *)(src + x * 1600);
+            drow[x] = srow[799 - y];
+        }
+    }
+    fprintf(stderr, "pxp: blit src=0x%08x dst=0x%08x (800x480 -> 480x800 CCW)\n",
+            src_pa, dst_pa);
+}
+
 static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
                            unsigned size)
 {
@@ -260,14 +342,17 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
     }
 
     /*
-     * PXP: writing a register-set pointer to NEXT starts a process;
-     * model it as completing instantly (STAT.IRQ | NEXT_IRQ set, IRQ
-     * line raised until the guest's ISR clears the status bits).  The
-     * driver writes the raw physical address; ENABLED is a hardware
-     * "buffer pending" indication, not part of the write.
+     * PXP: writing a register-set pointer to NEXT starts a process.
+     * Copy the pixel data first, then report completion (STAT.IRQ |
+     * NEXT_IRQ set, IRQ line raised until the guest's ISR clears the
+     * status bits): the guest's driver waits on the completion IRQ,
+     * so the copy must be done before it is raised. The driver writes
+     * the raw physical address; ENABLED is a hardware "buffer pending"
+     * indication, not part of the write.
      */
     if (s->kind == KIND_PXP) {
-        if (idx == PXP_NEXT_SLOT && value != 0) {
+        if (idx == PXP_NEXT_SLOT && off == 0 && value != 0) {
+            pxp_process((hwaddr)value);
             s->regs[PXP_STAT_SLOT] |= PXP_STAT_IRQ | PXP_STAT_NEXT_IRQ;
             qemu_set_irq(s->irq, true);
         }
