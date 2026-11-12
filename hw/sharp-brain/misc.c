@@ -22,6 +22,8 @@
  *     DLL calibration complete so the boot stage0 init sequence
  *     finishes
  *   - OCOTP: read back as written
+ *   - PXP: register-set blits executed synchronously on the
+ *     HW_PXP_NEXT write (see pxp_process)
  */
 
 #include "qemu/osdep.h"
@@ -240,8 +242,10 @@ static bool pxp_read_guest(hwaddr buf, uint8_t *out, uint32_t len)
     return true;
 }
 
-/* Host pointer for a guest-RAM range, or NULL if it is not a single
- * RAM region (same direct-RAM access lcdif_read_guest uses). */
+/*
+ * Host pointer for a guest-RAM range, or NULL if it is not a
+ * single RAM region.
+ */
 static uint8_t *pxp_host_ptr(hwaddr pa, uint32_t len)
 {
     MemoryRegionSection sec = memory_region_find(get_system_memory(), pa,
@@ -268,22 +272,12 @@ static void pxp_process(hwaddr next)
         return;
     }
     src = pxp_host_ptr(src_pa, 800 * 480 * 2);
-    /* The guest's copy loop reads the combine with stride 1600 (hardcoded
-     * `add r4, #1600` in the driver) and writes the fb with stride 960.
-     * The uploaded PXP model writes the rotated output with stride 1600,
-     * so the copy loop reads it 1:1 and the fb is an exact rotation
-     * (boottest203: copyloop(src=0x42d92000) == final fb, 384000/384000).
-     * Writing with stride 960 (the dest's nominal stride) makes the copy
-     * loop downscale 800->480 (boottest200: fb 238,951 px, garbled).
-     * So the dest stride here must be 1600, matching the copy loop's
-     * read stride and the uploaded model. The dest region is therefore
-     * 800 rows x 1600 B = 1,280,000 B. Rotation is CW (dest(y,x) =
-     * src(479-x, y)), matching the uploaded model: with CCW the console
-     * shows the setup screen upside-down (boottest204); with CW it is
-     * upright (boottest205). The register set carries no output-pitch
-     * field (set+0x08 is 0; full dump in boottest204/run.log), so the
-     * stride is taken from the copy loop / uploaded model, not the
-     * register set. */
+    /*
+     * The dest stride is 1600, not the nominal 960: the guest's
+     * copy loop reads the combine with stride 1600, so the dest
+     * region is 800 rows x 1600 B and the rotation is CW (see the
+     * pxp_process header comment above for the full story).
+     */
     dst = pxp_host_ptr(dst_pa, 800 * 800 * 2);
     if (!src || !dst) {
         return;
