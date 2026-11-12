@@ -178,7 +178,8 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
         break;
     case ILI9805_PIXFMT:
         s->pixel_fmt = val16 & 0xff;
-        qemu_log_mask(LOG_TRACE, "brain-panel: PIXFMT = 0x%02x\n", s->pixel_fmt);
+        qemu_log_mask(LOG_TRACE, "brain-panel: PIXFMT = 0x%02x\n",
+                      s->pixel_fmt);
         break;
     case ILI9805_CASET:
         if (s->cmd_pos < 4) {
