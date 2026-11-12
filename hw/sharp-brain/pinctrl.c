@@ -6,7 +6,9 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
- * GPIO register offsets (i.MX28, per gpio-mxs.c):
+ * HW_PINCTRL, base 0x80018000 (i.MX28 reference manual, ch. 37).
+ * The mux/drive/pull register file occupies 0x000..0x6ff; the GPIO
+ * registers follow (per gpio-mxs.c):
  *   DOUT(b)   0x700 + b*0x10    data out
  *   DIN(b)    0x900 + b*0x10    data in
  *   DOE(b)    0xb00 + b*0x10    output enable
@@ -28,15 +30,17 @@
 
 #define PINCTRL_BANKS 5
 
-#define REG_DOUT(b)   (0x700 + (b) * 0x10)
-#define REG_DIN(b)    (0x900 + (b) * 0x10)
-#define REG_DOE(b)    (0xb00 + (b) * 0x10)
-#define REG_PIN2IRQ(b) (0x1000 + (b) * 0x10)
-#define REG_IRQEN(b)  (0x1100 + (b) * 0x10)
-#define REG_IRQLEV(b) (0x1200 + (b) * 0x10)
-#define REG_IRQPOL(b) (0x1300 + (b) * 0x10)
-#define REG_IRQSTAT(b) (0x1400 + (b) * 0x10)
+/* GPIO register block starts here; below it is the mux register file */
+#define PINCTRL_GPIO_OFF 0x700
 
+#define REG_DOUT(b)    (PINCTRL_GPIO_OFF + (b) * 0x10)
+#define REG_DIN(b)     (0x900 + (b) * 0x10)
+#define REG_DOE(b)     (0xb00 + (b) * 0x10)
+#define REG_PIN2IRQ(b) (0x1000 + (b) * 0x10)
+#define REG_IRQEN(b)   (0x1100 + (b) * 0x10)
+#define REG_IRQLEV(b)  (0x1200 + (b) * 0x10)
+#define REG_IRQPOL(b)  (0x1300 + (b) * 0x10)
+#define REG_IRQSTAT(b) (0x1400 + (b) * 0x10)
 
 OBJECT_DECLARE_SIMPLE_TYPE(MxsPinctrlState, MXS_PINCTRL)
 
@@ -45,7 +49,7 @@ typedef struct MxsPinctrlState {
     MemoryRegion iomem;
     qemu_irq irq[PINCTRL_BANKS];
 
-    uint32_t mux[0x700 / 16];      /* mux/drive/pull register file */
+    uint32_t mux[PINCTRL_GPIO_OFF / 16]; /* mux/drive/pull register file */
     uint32_t dout[PINCTRL_BANKS];
     uint32_t ext_input[PINCTRL_BANKS];   /* externally driven DIN bits */
     uint32_t doe[PINCTRL_BANKS];
@@ -66,7 +70,10 @@ static uint32_t pinctrl_din(MxsPinctrlState *s, int b)
     /* a pin reads back its driven output when configured as output,
      * and the externally driven level (pull-up, key matrix, strap)
      * only when configured as an input */
-    return (s->dout[b] & s->doe[b]) | (s->ext_input[b] & ~s->doe[b]);
+    uint32_t driven = s->dout[b] & s->doe[b];
+    uint32_t external = s->ext_input[b] & ~s->doe[b];
+
+    return driven | external;
 }
 
 static void pinctrl_update_irq(MxsPinctrlState *s, int b)
@@ -216,7 +223,7 @@ static uint64_t pinctrl_read(void *opaque, hwaddr addr, unsigned size)
         return 0;
     }
 
-    if (reg < 0x700) {
+    if (reg < PINCTRL_GPIO_OFF) {
         return s->mux[reg / 0x10];
     }
     for (int b = 0; b < PINCTRL_BANKS; b++) {
@@ -258,7 +265,7 @@ static void pinctrl_write(void *opaque, hwaddr addr, uint64_t value,
     uint32_t reg = addr & ~0xf;
     uint32_t off = addr & 0xf;
 
-    if (reg < 0x700) {
+    if (reg < PINCTRL_GPIO_OFF) {
         if (off == 0) {
             s->mux[reg / 0x10] = value;
         } else if (off == 4) {
