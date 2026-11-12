@@ -177,6 +177,24 @@ static void timrot_arm(MxsTimrotState *s, int n)
          * wrap-aware 32-bit arithmetic; delta == 0 means the count
          * sits exactly on the match value (e.g. just crossed it),
          * so the next crossing is a full 32-bit wrap away.
+         *
+         * TCG artifact guard: the guest computes MATCH as
+         * (count read) - ticks, where ticks is 1 ms (12000 counts)
+         * or 100 ms (1200000) at 12 MHz.  On real hardware the ISR
+         * reads the count and writes MATCH microseconds apart, so
+         * MATCH is always in the future.  Under TCG the virtual
+         * clock advances at roughly wall rate while the guest
+         * executes much slower, so the read-to-write gap (and the
+         * IRQ-entry latency before the read) can exceed the tick
+         * interval: the written MATCH is then already in the past
+         * and the wrap-aware delta becomes a ~300 s wait, during
+         * which the guest sits in WFI.  The same stall was observed
+         * with MATCH values a whole 0x60000000 above the true
+         * count (the guest intermittently reads a stale count).
+         * A wait longer than half the 32-bit range (>179 s) is
+         * never the guest's intent here, so clamp it to one
+         * minimum tick (1 ms): the ISR then runs, reads a fresh
+         * count and reprograms MATCH correctly.
          */
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
@@ -186,6 +204,13 @@ static void timrot_arm(MxsTimrotState *s, int n)
 
         if (delta == 0) {
             delta = 0xffffffffu;
+        } else if (delta > 0x80000000u) {
+            /* match already in the past (stale guest read) */
+            uint64_t freq = timrot_freq(ctrl);
+            delta = freq ? (uint32_t)(freq / 1000) : 1;
+            if (delta == 0) {
+                delta = 1;
+            }
         }
         timer_mod(s->tick[n], now + (uint64_t)delta * nspt);
     } else {
