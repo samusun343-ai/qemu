@@ -25,9 +25,9 @@
  *     in the ISR (observed values 0xffffd120 = 1 ms and 0xffedb080 =
  *     100 ms idle tick at 12 MHz = 24 MHz / 2 prescale).
  *
- * Layout: ROTCTRL 0x00, ROTCOUNT 0x10, VERSION 0x120, then per
- * timer n (0x40 stride): TIMCTRLn 0x20, RUNNING_COUNT 0x30,
- * FIXED_COUNT 0x40, MATCH_COUNT 0x50.
+ * HW_TIMROT, base 0x80068000.  Layout: ROTCTRL 0x00, ROTCOUNT 0x10,
+ * VERSION 0x120, then per timer n (0x40 stride): TIMCTRLn 0x20,
+ * RUNNING_COUNT 0x30, FIXED_COUNT 0x40, MATCH_COUNT 0x50.
  */
 
 #include "qemu/osdep.h"
@@ -36,6 +36,8 @@
 #include "hw/core/irq.h"
 #include "brain.h"
 
+#define TIMROT_ROTCTRL        0x00
+#define TIMROT_ROTCOUNT       0x10
 #define TIMROT_TIMCTRL(n)     (0x20 + (n) * 0x40)
 #define TIMROT_RUNNING(n)     (0x30 + (n) * 0x40)
 #define TIMROT_FIXED(n)       (0x40 + (n) * 0x40)
@@ -61,6 +63,15 @@
 
 OBJECT_DECLARE_SIMPLE_TYPE(MxsTimrotState, MXS_TIMROT)
 
+/*
+ * The QEMUTimer callback needs the device plus the timer index;
+ * keep one callback record per timer inside the device state.
+ */
+typedef struct TimrotCb {
+    MxsTimrotState *s;
+    int n;
+} TimrotCb;
+
 typedef struct MxsTimrotState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
@@ -81,6 +92,7 @@ typedef struct MxsTimrotState {
     uint32_t base_count[4];
     bool counting[4];
     QEMUTimer *tick[4];
+    TimrotCb cb[4];
 } MxsTimrotState;
 
 static uint64_t timrot_freq(uint32_t ctrl)
@@ -143,17 +155,6 @@ static void timrot_freeze(MxsTimrotState *s, int n)
     s->base_count[n] = timrot_count(s, n);
     s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
-
-/*
- * The QEMUTimer callback needs the device plus the timer index; use a
- * small thunk array instead of embedding structs.
- */
-typedef struct TimrotCb {
-    MxsTimrotState *s;
-    int n;
-} TimrotCb;
-
-static TimrotCb timrot_cbs[4];     /* filled in realize (one device) */
 
 /* (re)arm the expiry timer for timer n */
 static void timrot_arm(MxsTimrotState *s, int n)
@@ -300,10 +301,10 @@ static uint64_t timrot_read(void *opaque, hwaddr addr, unsigned size)
         return 0;
     }
 
-    if (reg == 0x00) {
+    if (reg == TIMROT_ROTCTRL) {
         return s->rotctrl;
     }
-    if (reg == 0x10) {
+    if (reg == TIMROT_ROTCOUNT) {
         return s->rotcount;
     }
     /* VERSION register */
@@ -312,7 +313,7 @@ static uint64_t timrot_read(void *opaque, hwaddr addr, unsigned size)
     }
 
     if (reg >= TIMROT_TIMCTRL(0) && reg < TIMROT_TIMCTRL(3) + 0x40) {
-        int n = (reg - 0x20) / 0x40;
+        int n = (reg - TIMROT_TIMCTRL(0)) / 0x40;
         if (reg == TIMROT_TIMCTRL(n)) {
             return s->timctrl[n];
         }
@@ -342,7 +343,7 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
     qemu_log_mask(LOG_TRACE, "timrot: write 0x%03x off %u = 0x%08x\n",
                   (unsigned)reg, off, (uint32_t)value);
 
-    if (reg == 0x00) {
+    if (reg == TIMROT_ROTCTRL) {
         switch (off) {
         case 0:
             s->rotctrl = value;
@@ -359,13 +360,13 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
         }
         return;
     }
-    if (reg == 0x10) {
+    if (reg == TIMROT_ROTCOUNT) {
         s->rotcount = value;
         return;
     }
 
     if (reg >= TIMROT_TIMCTRL(0) && reg < TIMROT_TIMCTRL(3) + 0x40) {
-        int n = (reg - 0x20) / 0x40;
+        int n = (reg - TIMROT_TIMCTRL(0)) / 0x40;
 
         if (reg == TIMROT_TIMCTRL(n)) {
             switch (off) {
@@ -461,10 +462,10 @@ static void timrot_realize(DeviceState *dev, Error **errp)
     MxsTimrotState *s = MXS_TIMROT(dev);
 
     for (int n = 0; n < 4; n++) {
-        timrot_cbs[n].s = s;
-        timrot_cbs[n].n = n;
+        s->cb[n].s = s;
+        s->cb[n].n = n;
         s->tick[n] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                  timrot_expire, &timrot_cbs[n]);
+                                  timrot_expire, &s->cb[n]);
     }
 }
 
