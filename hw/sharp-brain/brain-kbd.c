@@ -69,7 +69,10 @@
  *  row6  Minus    L        R         Space    音声     S       英和
  *  row7  -        -        -         -        -        -       -
  *
- * rows = GPIO4_0..4_7 (guest-driven outputs).
+ * rows = guest-driven outputs.  Logical row -> GPIO4 bit (from
+ * brainux brain-kbd-gpio.c: GPIO4_5 is unused; row 5 = GPIO4_6,
+ * row 6 = GPIO4_7): row0=GPIO4_0, row1=GPIO4_1, row2=GPIO4_2,
+ * row3=GPIO4_3, row4=GPIO4_4, row5=GPIO4_6, row6=GPIO4_7.
  * col0..col5 = GPIO2_16..GPIO2_21, col6 = GPIO4_8 (pulled-up inputs).
  */
 
@@ -211,10 +214,27 @@ const BrainKbdLayout *brain_kbd_find_layout(const char *name)
 
 #define CONTACT_BIT(r, c)   (1ULL << ((r) * BRAIN_KBD_COLS + (c)))
 
+/* Logical row -> physical GPIO4 bit.
+ * From brainux (brain-hackers/linux-brain, drivers/input/keyboard/
+ * brain-kbd-gpio.c, `bk_gpio_read_keys`): the raw GPIO4 read is
+ * decoded so that raw bits 6 and 7 map to rows 5 and 6, and raw
+ * bit 5 (GPIO4_5) is UNUSED.  The board wires logical row 5 to
+ * GPIO4_6 and logical row 6 to GPIO4_7; GPIO4_5 is not a row.
+ * The WinCE driver drives the rows, so it must drive the same
+ * physical pins to scan a given logical row.  Row 7 has no keys
+ * and no pin. */
+static const int brain_kbd_row_gpio_bit[BRAIN_KBD_ROWS] =
+    { 0, 1, 2, 3, 4, 6, 7, -1 };
+
 /* row r is driven low by the guest (output enabled, DOUT clear) */
 static bool brain_kbd_row_low(BrainKbdState *s, int r)
 {
-    return (s->row_doe & (1u << r)) && !(s->row_out & (1u << r));
+    int bit = brain_kbd_row_gpio_bit[r];
+
+    if (bit < 0) {
+        return false;
+    }
+    return (s->row_doe & (1u << bit)) && !(s->row_out & (1u << bit));
 }
 
 /*
