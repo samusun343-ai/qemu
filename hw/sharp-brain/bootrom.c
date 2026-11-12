@@ -65,7 +65,7 @@
 #include "target/arm/cpu-qom.h"
 #include "brain.h"
 
-#define BOOTROM_TRAMPOLINE  0x0001ff00      /* top of IRAM (unused by ROM images) */
+#define BOOTROM_TRAMPOLINE  0x0001ff00      /* in IRAM, unused by ROM images */
 #define BOOTROM_MAILBOX     0x8003c000      /* SIMDBG block, unused on Brain */
 #define BOOTROM_SP          0x00020000      /* IRAM top */
 #define BOOTROM_PARK_PC     0x0001fff8      /* self-loop at IRAM top - 8 */
