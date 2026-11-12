@@ -6,29 +6,25 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
- * Register layout (16-byte "stmp" blocks, REG/SET/CLR/TOG):
- *   0x0000 VECTOR     - read: vector address of current interrupt
- *                       write: latch interrupt number for vectoring
- *   0x0010 LEVELACK   - write: acknowledge interrupt level
- *   0x0020 CTRL
- *   0x0070 STAT       - read: number of highest-priority active IRQ
- *   0x0120 + n*0x10 INTERRUPTn - enable (bit 2) / priority (bits 7:4? kept)
+ * HW_ICOLL, base 0x80000000.  Register layout (16-byte blocks with
+ * REG/SET/CLR/TOG aliases):
+ *   0x0000 VECTOR     - read: vector_base + 4 * (current IRQ)
+ *                       write: latch an IRQ number (small value) or
+ *                       program the vector base (page-aligned value)
+ *   0x0010 LEVELACK   - interrupt-level acknowledge shadow
+ *   0x0020 CTRL       - global control
+ *   0x0020..0x011f    - vector table alias: VECTOR + 0x20 + 4 * n
+ *                       holds the handler address for IRQ n
+ *   0x0070 STAT       - read: number of the highest-priority active
+ *                       IRQ (0x7f when none)
+ *   0x0120 + n * 0x10 INTERRUPTn - enable (bit 2) / priority
  *
- * The hardware contains a software-programmed vector table; the
- * Windows CE BSP arms it by writing the IRQ number to VECTOR and then
- * reading back the handler address. We keep a 128-entry vector table
- * that can be written by the guest through the VECTOR register
- * after latching an interrupt (observed behaviour on the real
- * machine is that the ROM leaves a default table in IRAM; the
- * BSP installs its own handlers by patching that table, so we
- * redirect vector reads to a table the guest can control through
- * the INTERRUPTn registers' unused upper bits is NOT used - instead
- * the WinCE handler pattern is:
+ * The Windows CE dispatcher pattern is:
  *     irqnr = readl(STAT); writel(irqnr, VECTOR); fn = readl(VECTOR);
- * and the value read back is the handler address stored in the ICOLL.
- * Freescale's BSP writes handler addresses into the table via
- * VECTOR+0x20+4*n (see HW_ICOLL_VECTOR fields in the WinCE BSP).
- * We implement that alias region as the vector table itself.
+ * and the BSP installs handler addresses by writing the vector table
+ * alias region (HW_ICOLL_VECTOR fields in the Freescale BSP), so the
+ * model keeps a per-IRQ handler table in that alias region plus the
+ * vector_base the VECTOR read path returns.
  */
 
 #include "qemu/osdep.h"
@@ -48,7 +44,9 @@
 #define ICOLL_INTR_SOFTIRQ  (1 << 1)
 #define ICOLL_INTR_FIQ      (1 << 0)
 
-struct MxsIcollState {
+OBJECT_DECLARE_SIMPLE_TYPE(MxsIcollState, MXS_ICOLL)
+
+typedef struct MxsIcollState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     qemu_irq cpu_irq;
@@ -59,24 +57,23 @@ struct MxsIcollState {
     uint32_t vector_latch;      /* last IRQ number written to VECTOR */
     uint32_t vectors[ICOLL_INTR_NREG];   /* handler addresses (ROM flow) */
     uint32_t intr[ICOLL_INTR_NREG];      /* enable/prio per IRQ */
-    uint32_t pending[ICOLL_INTR_NREG];   /* software-pending state */
     bool asserted[ICOLL_INTR_NREG];      /* level state of input lines */
-};
+} MxsIcollState;
 
-OBJECT_DECLARE_SIMPLE_TYPE(MxsIcollState, MXS_ICOLL)
+/* the highest-priority (lowest-numbered) asserted + enabled IRQ */
+static int icoll_current_irq(MxsIcollState *s)
+{
+    for (int i = 0; i < ICOLL_INTR_NREG; i++) {
+        if (s->asserted[i] && (s->intr[i] & ICOLL_INTR_ENABLE)) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 static void icoll_update(MxsIcollState *s)
 {
-    int i, active = -1;
-
-    for (i = 0; i < ICOLL_INTR_NREG; i++) {
-        if (s->asserted[i] && (s->intr[i] & ICOLL_INTR_ENABLE)) {
-            active = i;
-            break;
-        }
-    }
-
-    if (active >= 0) {
+    if (icoll_current_irq(s) >= 0) {
         qemu_irq_raise(s->cpu_irq);
     } else {
         qemu_irq_lower(s->cpu_irq);
@@ -95,16 +92,6 @@ static void icoll_set_irq(void *opaque, int n, int level)
     }
     s->asserted[n] = !!level;
     icoll_update(s);
-}
-
-static int icoll_current_irq(MxsIcollState *s)
-{
-    for (int i = 0; i < ICOLL_INTR_NREG; i++) {
-        if (s->asserted[i] && (s->intr[i] & ICOLL_INTR_ENABLE)) {
-            return i;
-        }
-    }
-    return -1;
 }
 
 static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
@@ -147,12 +134,11 @@ static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
         return s->ctrl;
     case ICOLL_STAT:
     {
-        int i;
-        for (i = 0; i < ICOLL_INTR_NREG; i++) {
-            if (s->asserted[i] && (s->intr[i] & ICOLL_INTR_ENABLE)) {
-                qemu_log_mask(LOG_TRACE, "icoll: STAT -> %d\n", i);
-                return i;
-            }
+        int n = icoll_current_irq(s);
+
+        if (n >= 0) {
+            qemu_log_mask(LOG_TRACE, "icoll: STAT -> %d\n", n);
+            return n;
         }
         qemu_log_mask(LOG_TRACE, "icoll: STAT -> none\n");
         return 0x7f;    /* no interrupt */
@@ -286,7 +272,6 @@ static void icoll_reset(DeviceState *dev)
     MxsIcollState *s = MXS_ICOLL(dev);
 
     memset(s->asserted, 0, sizeof(s->asserted));
-    memset(s->pending, 0, sizeof(s->pending));
     memset(s->intr, 0, sizeof(s->intr));
     memset(s->vectors, 0, sizeof(s->vectors));
     s->ctrl = 0;
