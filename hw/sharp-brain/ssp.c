@@ -6,10 +6,11 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
- * The SSP block is i.MX28's SD/MMC host controller (SSP0: 8-bit eMMC,
- * SSP1: 4-bit SD card on the Brain).  Command execution is started
- * either by a CPU write to CTRL0 with RUN set, or implicitly by the
- * APBH DMA after a PIO descriptor writes the CTRL0/CMD0/CMD1
+ * The SSP block is the SD/MMC host controller (SSP0: 8-bit eMMC,
+ * SSP1: 4-bit SD card on the Brain; instances are mapped at
+ * IMX28_SSP0_BASE + n * 0x2000, see imx28.c).  Command execution is
+ * started either by a CPU write to CTRL0 with RUN set, or implicitly
+ * by the APBH DMA after a PIO descriptor writes the CTRL0/CMD0/CMD1
  * registers.
  */
 
@@ -110,6 +111,17 @@
 
 #define SSP_FIFO_WORDS  32
 
+/* REG/SET/CLR/TOG alias write, shared by the plain storage registers */
+static void ssp_alias_write(uint32_t *reg, uint32_t off, uint32_t value)
+{
+    switch (off) {
+    case 0:  *reg = value; break;
+    case 4:  *reg |= value; break;
+    case 8:  *reg &= ~value; break;
+    case 12: *reg ^= value; break;
+    }
+}
+
 static void mxs_ssp_irq_update(MxsSspState *s)
 {
     uint32_t fires = 0;
@@ -146,7 +158,6 @@ static void mxs_ssp_fill_fifo(MxsSspState *s);
  */
 static void mxs_ssp_execute(MxsSspState *s)
 {
-
     SDRequest req;
     uint8_t resp[16];
     size_t rlen;
@@ -155,7 +166,9 @@ static void mxs_ssp_execute(MxsSspState *s)
     req.arg = s->cmd1;
     req.crc = 0;
 
-    qemu_log_mask(LOG_TRACE, "mxs-ssp%d: [@%u] CMD%d arg 0x%08x (ctrl0 0x%08x)\n", s->id,
+    qemu_log_mask(LOG_TRACE,
+                  "mxs-ssp%d: [@%u] CMD%d arg 0x%08x (ctrl0 0x%08x)\n",
+                  s->id,
                   (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000),
                   req.cmd, req.arg, s->ctrl0);
 
@@ -313,7 +326,8 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
     } else {
         if (!(s->ctrl0 & CTRL0_DATA_XFER) || !s->data_dir_read) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "mxs-ssp%d: dma read without pending read data\n", s->id);
+                          "mxs-ssp%d: dma read without pending read data\n",
+                          s->id);
             g_free(buf);
             return -1;
         }
@@ -354,9 +368,7 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
                       (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000),
                       n, from_fifo, buf[0], buf[1], buf[2], buf[3],
                       s->fifo_level);
-        if (s->data_remaining == 0 && s->fifo_level == 0) {
-            s->status &= ~STATUS_DATA_BUSY;
-        } else if (s->data_remaining == 0) {
+        if (s->data_remaining == 0) {
             s->status &= ~STATUS_DATA_BUSY;
         }
     }
@@ -372,7 +384,6 @@ static uint64_t mxs_ssp_read(void *opaque, hwaddr addr, unsigned size)
 {
     MxsSspState *s = opaque;
     uint32_t reg = addr & ~0xf;
-    uint32_t off = addr & 0xf;
 
     switch (reg) {
     case SSP_CTRL0:
@@ -411,7 +422,7 @@ static uint64_t mxs_ssp_read(void *opaque, hwaddr addr, unsigned size)
     case SSP_SDRESP(1):
     case SSP_SDRESP(2):
     case SSP_SDRESP(3):
-        return s->sdresp[(reg - 0xa0) / 0x10];
+        return s->sdresp[(reg - SSP_SDRESP(0)) / 0x10];
     case SSP_STATUS:
     {
         uint32_t st = s->status;
@@ -443,11 +454,10 @@ static uint64_t mxs_ssp_read(void *opaque, hwaddr addr, unsigned size)
         return s->version;
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "mxs-ssp%d: unimplemented read 0x%" HWADDR_PRIx "\n", s->id,
-                      addr);
+                      "mxs-ssp%d: unimplemented read 0x%" HWADDR_PRIx "\n",
+                      s->id, addr);
         return 0;
     }
-    (void)off;
 }
 
 static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
@@ -489,52 +499,22 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         return;
     }
     case SSP_CMD0:
-        switch (off) {
-        case 0:  s->cmd0 = value; break;
-        case 4:  s->cmd0 |= value; break;
-        case 8:  s->cmd0 &= ~value; break;
-        case 12: s->cmd0 ^= value; break;
-        }
+        ssp_alias_write(&s->cmd0, off, value);
         return;
     case SSP_CMD1:
-        switch (off) {
-        case 0:  s->cmd1 = value; break;
-        case 4:  s->cmd1 |= value; break;
-        case 8:  s->cmd1 &= ~value; break;
-        case 12: s->cmd1 ^= value; break;
-        }
+        ssp_alias_write(&s->cmd1, off, value);
         return;
     case SSP_XFER_SIZE:
-        switch (off) {
-        case 0:  s->xfer_size = value; break;
-        case 4:  s->xfer_size |= value; break;
-        case 8:  s->xfer_size &= ~value; break;
-        case 12: s->xfer_size ^= value; break;
-        }
+        ssp_alias_write(&s->xfer_size, off, value);
         return;
     case SSP_BLOCK_SIZE:
-        switch (off) {
-        case 0:  s->block_size = value; break;
-        case 4:  s->block_size |= value; break;
-        case 8:  s->block_size &= ~value; break;
-        case 12: s->block_size ^= value; break;
-        }
+        ssp_alias_write(&s->block_size, off, value);
         return;
     case SSP_COMPREF:
-        switch (off) {
-        case 0:  s->compref = value; break;
-        case 4:  s->compref |= value; break;
-        case 8:  s->compref &= ~value; break;
-        case 12: s->compref ^= value; break;
-        }
+        ssp_alias_write(&s->compref, off, value);
         return;
     case SSP_COMPMASK:
-        switch (off) {
-        case 0:  s->compmask = value; break;
-        case 4:  s->compmask |= value; break;
-        case 8:  s->compmask &= ~value; break;
-        case 12: s->compmask ^= value; break;
-        }
+        ssp_alias_write(&s->compmask, off, value);
         return;
     case SSP_TIMING:
         s->timing = value;
@@ -543,20 +523,7 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         qemu_log_mask(LOG_TRACE, "mxs-ssp%d: CTRL1 %s 0x%08x\n", s->id,
                       off == 0 ? "REG" : off == 4 ? "SET" :
                       off == 8 ? "CLR" : "TOG", (uint32_t)value);
-        switch (off) {
-        case 0:
-            s->ctrl1 = value;
-            break;
-        case 4:
-            s->ctrl1 |= value;
-            break;
-        case 8:
-            s->ctrl1 &= ~value;
-            break;
-        case 12:
-            s->ctrl1 ^= value;
-            break;
-        }
+        ssp_alias_write(&s->ctrl1, off, value);
         mxs_ssp_irq_update(s);
         return;
     case SSP_DATA:
@@ -580,22 +547,12 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         /* DDR control: the guest writes 0 to run in SDR mode (no DDR).
          * Stored read-as-written; the SSP model is SDR-only, so there
          * is no DDR side effect to apply. */
-        switch (off) {
-        case 0:  s->ddr_ctrl = value; break;
-        case 4:  s->ddr_ctrl |= value; break;
-        case 8:  s->ddr_ctrl &= ~value; break;
-        case 12: s->ddr_ctrl ^= value; break;
-        }
+        ssp_alias_write(&s->ddr_ctrl, off, value);
         return;
     case SSP_DLL_CTRL:
         /* DLL control: stored read-as-written; the model has no DLL
          * to tune, so there is no side effect. */
-        switch (off) {
-        case 0:  s->dll_ctrl = value; break;
-        case 4:  s->dll_ctrl |= value; break;
-        case 8:  s->dll_ctrl &= ~value; break;
-        case 12: s->dll_ctrl ^= value; break;
-        }
+        ssp_alias_write(&s->dll_ctrl, off, value);
         return;
     default:
         qemu_log_mask(LOG_UNIMP,
