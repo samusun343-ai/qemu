@@ -416,17 +416,23 @@ OBJECT_DECLARE_SIMPLE_TYPE(BrainKbdState, BRAIN_KBD)
  * keycode (KEY_CNT entries); the QEMU input core delivers host key
  * events as linux keycodes.
  *
+ * The tables only list keys that exist on the Brain; the entries
+ * for all other host keys are zero-filled, so flags carries the
+ * validity of the mapping: flags == 0 means "unmapped" and the
+ * entry is ignored.  (Row 0, column 0 is a real key -- V -- so an
+ * in-band row/col sentinel could not express "unmapped" here.)
+ *
  * flags:
  *   BRAIN_KEY_DIRECT - key closes the (row, col) contact
  *   BRAIN_KEY_SYMBOL - key additionally holds the "symbols" (記号)
  *                      modifier contact while down, reproducing the
  *                      blue-legend layer of the real keyboard
  */
-#define BRAIN_KEY_DIRECT 0
-#define BRAIN_KEY_SYMBOL 1
+#define BRAIN_KEY_DIRECT (1 << 0)
+#define BRAIN_KEY_SYMBOL (1 << 1)
 
 typedef struct BrainKeyDef {
-    int8_t row;                 /* -1 = unmapped */
+    int8_t row;                 /* valid only when flags != 0 */
     int8_t col;
     uint8_t flags;
 } BrainKeyDef;

@@ -313,7 +313,7 @@ static void brain_kbd_apply(BrainKbdState *s, const BrainKeyDef *e, bool down)
 {
     const BrainKbdLayout *l = s->layout;
 
-    if (!e || e->row < 0) {
+    if (!e || e->row < 0 || e->flags == 0) {
         return;
     }
     brain_kbd_set_contact(s, e->row, e->col, down);
@@ -350,7 +350,7 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     }
 
     e = &s->layout->direct[key];
-    if (s->ctrl_held && s->layout->combo[key].row >= 0) {
+    if (s->ctrl_held && s->layout->combo[key].flags != 0) {
         e = &s->layout->combo[key];
     }
     brain_kbd_apply(s, e, down);
