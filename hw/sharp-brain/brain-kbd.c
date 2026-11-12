@@ -8,15 +8,15 @@
  *
  * Hardware (PW-SH6 platform, from linux-brain imx28-pwsh6.dts):
  *
- *   rows (inputs, pulled up):   GPIO4_0 .. GPIO4_7
- *   columns (outputs):          GPIO2_16..GPIO2_21, GPIO4_8
+ *   rows (outputs, guest-driven):  GPIO4_0 .. GPIO4_7
+ *   columns (inputs, pulled up):   GPIO2_16..GPIO2_21, GPIO4_8
  *
- * The keyboard is scanned by driving one column low at a time while
- * the others stay hi-Z; a pressed key pulls its row low.  This model
- * keeps a bitmask of closed contacts and re-evaluates the row input
- * levels whenever the guest re-drives the columns (observed through
- * the PINCTRL output hook) or a host key event changes the contact
- * mask.
+ * The guest scans the matrix by driving the rows low (all of them
+ * for interrupt detection, one at a time while scanning); a pressed
+ * key pulls its column low.  This model keeps a bitmask of closed
+ * contacts and re-evaluates the column input levels whenever the
+ * guest re-drives the rows (observed through the PINCTRL output
+ * hook) or a host key event changes the contact mask.
  *
  * Host key -> guest mapping policy (keys arrive as linux keycodes):
  *
@@ -28,8 +28,8 @@
  *     host holds the symbols contact plus the base key contact, which
  *     is exactly what typing them on the real device does.
  *   - Brain-specific dictionary keys that have no PC equivalent
- *     (戻る, History, My辞書, 一覧, 国語, 音声, 英和, 記号, marker,
- *     search) are reached through Ctrl+letter combinations.
+ *     (戻る, History, My辞書, 一覧, 国語, 音声, 英和, 記号,
+ *     marker, search) are reached through Ctrl+letter combinations.
  */
 
 #include "qemu/osdep.h"
@@ -60,7 +60,7 @@
  * they idle high; a pressed key pulls its column low.
  *
  *        col0     col1     col2      col3     col4     col5    col6
- *  row0  V        H        Y         戻る     C        D       (Home)
+ *  row0  V        H        Y         戻る     C        D       -
  *  row1  M        K        History   Down     PageUp   F       E
  *  row2  B        J        U         Left     記号     X       -
  *  row3  N        I        My辞書    Up       PageDown Q       Home
@@ -177,12 +177,12 @@ static const BrainKeyDef pwsh6_combo[KEY_CNT] = {
     [KEY_H]                    = { 1, 2, D },   /* Ctrl+H  -> 履歴 History */
     [KEY_D]                    = { 3, 2, D },   /* Ctrl+D  -> マイ辞書 */
     [KEY_L]                    = { 5, 2, D },   /* Ctrl+L  -> 一覧 (list) */
-    [KEY_K]                    = { 5, 6, D },   /* Ctrl+K  -> 国語 (J-J dict) */
-    [KEY_J]                    = { 6, 6, D },   /* Ctrl+J  -> 英和 (E-J dict) */
+    [KEY_K]                    = { 5, 6, D },   /* Ctrl+K  -> 国語 */
+    [KEY_J]                    = { 6, 6, D },   /* Ctrl+J  -> 英和 */
     [KEY_V]                    = { 6, 4, D },   /* Ctrl+V  -> 音声 (voice) */
-    [KEY_S]                    = { SYM_ROW, SYM_COL, D }, /* Ctrl+S -> hold 記号 */
-    [KEY_M]                    = { 5, 2, S },   /* Ctrl+M  -> マーカー (記号+一覧) */
-    [KEY_F]                    = { 3, 6, S },   /* Ctrl+F  -> 検索 (記号+Home) */
+    [KEY_S]                    = { SYM_ROW, SYM_COL, D }, /* Ctrl+S -> 記号 */
+    [KEY_M]                    = { 5, 2, S },   /* Ctrl+M  -> マーカー */
+    [KEY_F]                    = { 3, 6, S },   /* Ctrl+F  -> 検索 */
 };
 
 static const BrainKbdLayout pwsh6_layout = {
@@ -223,8 +223,9 @@ const BrainKbdLayout *brain_kbd_find_layout(const char *name)
  * The WinCE driver drives the rows, so it must drive the same
  * physical pins to scan a given logical row.  Row 7 has no keys
  * and no pin. */
-static const int brain_kbd_row_gpio_bit[BRAIN_KBD_ROWS] =
-    { 0, 1, 2, 3, 4, 6, 7, -1 };
+static const int brain_kbd_row_gpio_bit[BRAIN_KBD_ROWS] = {
+    0, 1, 2, 3, 4, 6, 7, -1
+};
 
 /* row r is driven low by the guest (output enabled, DOUT clear) */
 static bool brain_kbd_row_low(BrainKbdState *s, int r)
@@ -293,15 +294,13 @@ static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
 
 static void brain_kbd_set_contact(BrainKbdState *s, int r, int c, bool down)
 {
-    uint64_t m = CONTACT_BIT(r, c);
-
     if (r < 0 || c < 0 || r >= BRAIN_KBD_ROWS || c >= BRAIN_KBD_COLS) {
         return;
     }
     if (down) {
-        s->pressed |= m;
+        s->pressed |= CONTACT_BIT(r, c);
     } else {
-        s->pressed &= ~m;
+        s->pressed &= ~CONTACT_BIT(r, c);
     }
 }
 
