@@ -132,7 +132,7 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
         if (x_mode && ch == CH_YP) {
             return ((uint64_t)s->x * 4095) / MAX(s->x_max, 1);
         }
-        if (y_mode && ch == CH_XM) {
+        if (y_mode && (ch == CH_XM || ch == CH_XP)) {
             return ((uint64_t)s->y * 4095) / MAX(s->y_max, 1);
         }
         if (p_mode && (ch == CH_YM || ch == CH_XP)) {
@@ -209,7 +209,7 @@ static void lradc_touch_event_check(MxsLradcState *s)
 {
     bool raw = s->touch_down;
 
-    if (raw != !(s->status & BM_STATUS_TOUCH_RAW)) {
+    if (raw != !!(s->status & BM_STATUS_TOUCH_RAW)) {
         /* state changed */
         if (raw) {
             s->status |= BM_STATUS_TOUCH_RAW | BM_STATUS_TOUCH_PRESENT;
