@@ -90,6 +90,7 @@ typedef struct MxsRtcState {
     uint64_t epoch_seconds;    /* guest-visible seconds at sec_base_ns */
     int64_t ms_base_ns;        /* host ns when MILLISECONDS was written  */
     uint32_t ms_offset;        /* guest-visible ms value at ms_base_ns   */
+    bool powered;              /* time base anchored (always-on domain)  */
 } MxsRtcState;
 
 /* REG/SET/CLR/TOG alias write, shared by the register blocks below */
@@ -244,10 +245,22 @@ static void rtc_reset(DeviceState *dev)
     s->watchdog = 0;
     s->debug = 0;
     /* persistent registers survive resets (battery backed) */
-    s->sec_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    s->epoch_seconds = RTC_DEFAULT_EPOCH_SECONDS;
-    s->ms_base_ns = s->sec_base_ns;
-    s->ms_offset = 0;
+    /*
+     * The counters live in the same always-on domain: on the real
+     * SoC they are cleared only by the RTC power-on reset, never by
+     * a system reset. The guest's suspend is a reset-resume (wake
+     * runs EBOOT, which checks the resume info in RAM and lets the
+     * kernel restore the system time from HW_RTC_SECONDS), so
+     * re-anchoring the time base here would zero the clock at every
+     * resume. Anchor it once, at power-on.
+     */
+    if (!s->powered) {
+        s->sec_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->epoch_seconds = RTC_DEFAULT_EPOCH_SECONDS;
+        s->ms_base_ns = s->sec_base_ns;
+        s->ms_offset = 0;
+        s->powered = true;
+    }
     qemu_set_irq(s->irq, 0);
 }
 
