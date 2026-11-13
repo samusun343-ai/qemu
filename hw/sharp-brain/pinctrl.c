@@ -33,6 +33,7 @@
 /* GPIO register block starts here; below it is the mux register file */
 #define PINCTRL_GPIO_OFF 0x700
 
+#define REG_PULL(b)    (0x600 + (b) * 0x10)
 #define REG_DOUT(b)    (PINCTRL_GPIO_OFF + (b) * 0x10)
 #define REG_DIN(b)     (0x900 + (b) * 0x10)
 #define REG_DOE(b)     (0xb00 + (b) * 0x10)
@@ -52,6 +53,7 @@ typedef struct MxsPinctrlState {
     uint32_t mux[PINCTRL_GPIO_OFF / 16]; /* mux/drive/pull register file */
     uint32_t dout[PINCTRL_BANKS];
     uint32_t ext_input[PINCTRL_BANKS];   /* externally driven DIN bits */
+    uint32_t ext_driven[PINCTRL_BANKS];  /* pins an external device drives */
     uint32_t doe[PINCTRL_BANKS];
     uint32_t pin2irq[PINCTRL_BANKS];
     uint32_t irqen[PINCTRL_BANKS];
@@ -67,13 +69,21 @@ typedef struct MxsPinctrlState {
 
 static uint32_t pinctrl_din(MxsPinctrlState *s, int b)
 {
-    /* a pin reads back its driven output when configured as output,
-     * and the externally driven level (pull-up, key matrix, strap)
-     * only when configured as an input */
+    /*
+     * A pin configured as output reads back its driven output. An
+     * input pin reads the level an attached external device drives
+     * (key matrix, strap); an input pin with nothing attached reads
+     * its internal pull-up level: the i.MX28 pads have pull-ups only,
+     * enabled per pin through the PINCTRL_PULL registers (kept in the
+     * mux[] register file). Without this, a pulled-up but undriven
+     * line (e.g. GPIO0_7) reads low where the real pad reads high.
+     */
     uint32_t driven = s->dout[b] & s->doe[b];
-    uint32_t external = s->ext_input[b] & ~s->doe[b];
+    uint32_t external = s->ext_input[b] & s->ext_driven[b] & ~s->doe[b];
+    uint32_t pullup = s->mux[REG_PULL(b) / 16] & ~s->doe[b]
+                    & ~s->ext_driven[b];
 
-    return driven | external;
+    return driven | external | pullup;
 }
 
 static void pinctrl_update_irq(MxsPinctrlState *s, int b)
@@ -143,6 +153,7 @@ void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,
         return;
     }
     s->ext_input[bank] = (s->ext_input[bank] & ~mask) | (value & mask);
+    s->ext_driven[bank] |= mask;
     pinctrl_update_irq(s, bank);
 }
 
@@ -274,6 +285,12 @@ static void pinctrl_write(void *opaque, hwaddr addr, uint64_t value,
             s->mux[reg / 0x10] &= ~value;
         } else {
             s->mux[reg / 0x10] ^= value;
+        }
+        /* enabling a pull-up can raise an undriven input's DIN level */
+        for (int b = 0; b < PINCTRL_BANKS; b++) {
+            if (reg == REG_PULL(b)) {
+                pinctrl_update_irq(s, b);
+            }
         }
         return;
     }
