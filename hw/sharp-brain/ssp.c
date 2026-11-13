@@ -194,18 +194,29 @@ static void mxs_ssp_execute(MxsSspState *s)
     }
 
     /*
-     * Response mapping (verified against the Linux mxs-mmc driver):
+     * Response mapping:
      *   48-bit response: SDRESP0 = the 32-bit value (wire order)
-     *   136-bit response: SDRESP0..3 = wire words 0..3
+     *   136-bit response: the SDRESP registers hold the response in
+     *   REVERSE word order - SDRESP0 carries the least significant
+     *   wire word (resp[12..15]), SDRESP3 the most significant
+     *   (resp[0..3]).  On the real i.MX28 the response shift register
+     *   presents the first-received word last; host drivers that copy
+     *   SDRESP0..3 verbatim into a buffer (the WinCE SDHC PDD does)
+     *   therefore get the register image in MSB-at-the-end order,
+     *   which is what the CE sdbus register parser expects.  With
+     *   wire word order here, that parser read CSD byte 12's top bits
+     *   as CSD_STRUCTURE=2 and rejected every SD card, so the microSD
+     *   client driver failed DSK_Init and \Storage Card never mounted
+     *   (§BO, boottest346-352).
      */
     s->sdresp[0] = s->sdresp[1] = s->sdresp[2] = s->sdresp[3] = 0;
     if (rlen == 4) {
         s->sdresp[0] = ldl_be_p(resp);
     } else if (rlen >= 16) {
-        s->sdresp[0] = ldl_be_p(&resp[0]);
-        s->sdresp[1] = ldl_be_p(&resp[4]);
-        s->sdresp[2] = ldl_be_p(&resp[8]);
-        s->sdresp[3] = ldl_be_p(&resp[12]);
+        s->sdresp[0] = ldl_be_p(&resp[12]);
+        s->sdresp[1] = ldl_be_p(&resp[8]);
+        s->sdresp[2] = ldl_be_p(&resp[4]);
+        s->sdresp[3] = ldl_be_p(&resp[0]);
     }
 
     /* command done: reset sticky error/status bits */
