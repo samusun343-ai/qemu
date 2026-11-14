@@ -125,12 +125,26 @@ static bool mxs_dma_read_desc(dma_addr_t addr,
  * executed synchronously: PIO words are poked into the peripheral,
  * data descriptors call the peripheral's data hook.
  */
-static void mxs_dma_run_channel(MxsDmaState *s, int ch)
+static void mxs_dma_run_budget(MxsDmaState *s, int ch, int budget)
 {
     dma_addr_t cur = s->nxctmdar[ch];
     int steps = 0;
 
-    while (cur && steps++ < 1024) {
+    /*
+     * SAIF channels carry endless circular descriptor chains (the
+     * WaveDev driver double-buffers through two descriptors that
+     * point at each other).  Hardware consumes them at the audio
+     * sample rate, so a kick only starts the stream: run a few
+     * descriptors to prime it and leave the resume point in
+     * NXTCMDAR for the SAIF device's pacing timer (mxs_dma_pace).
+     */
+    bool streaming = s->is_apbx && (ch == 4 || ch == 5) &&
+                     s->saif[ch - 4] != NULL;
+    if (streaming && budget > 4) {
+        budget = 4;
+    }
+
+    while (cur && steps++ < budget) {
         uint32_t next, bits, xfer, bufaddr;
         uint32_t pio[16] = { 0 };
         MxsSspState *ssp = (!s->is_apbx && ch < 4) ? s->ssp[ch] : NULL;
@@ -275,9 +289,30 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
         }
     }
 
-    if (steps >= 1024) {
+    if (streaming && cur) {
+        /* paused mid-chain: the pacing timer resumes from here */
+        s->nxctmdar[ch] = cur;
+    } else if (steps >= 1024) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "mxs-dma: channel %d descriptor chain too long\n", ch);
+    }
+}
+
+static void mxs_dma_run_channel(MxsDmaState *s, int ch)
+{
+    mxs_dma_run_budget(s, ch, 1024);
+}
+
+/*
+ * Advance a streaming (SAIF) channel's circular chain by up to
+ * @budget descriptors.  Called from the SAIF device's pacing
+ * timer so completion IRQs and buffer consumption happen at the
+ * audio rate instead of all at once.
+ */
+void mxs_dma_pace(MxsDmaState *s, int ch, int budget)
+{
+    if (s->nxctmdar[ch]) {
+        mxs_dma_run_budget(s, ch, budget);
     }
 }
 

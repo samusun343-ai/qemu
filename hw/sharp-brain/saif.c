@@ -35,10 +35,13 @@
  *     reads 1 while running), DATA 0x20 (CPU writes feed the TX
  *     FIFO), VERSION 0x30 = 0x01010000.
  *   - TX bytes (DMA or CPU) queue in a FIFO and drain to the QEMU
- *     audio backend at 44.1 kHz stereo s16 via a 1 ms virtual
- *     clock timer and the backend's avail callback.  Overflow is
- *     dropped, not back-pressured (the DMA completes regardless,
- *     like the hardware FIFO draining in real time).
+ *     audio backend at 44.1 kHz stereo s16 via a pacing timer and
+ *     the backend's avail callback.  The DMA chain is circular
+ *     (two double-buffered descriptors), so the DMA engine only
+ *     primes it; this device's timer resumes it one buffer per
+ *     buffer-duration (mxs_dma_pace), which spreads the driver's
+ *     completion IRQs and refills over time like hardware.
+ *     Overflow is dropped, not back-pressured.
  *   - RX (record) DMA reads back silence; the guest's record path
  *     is not exercised by any bundled application found so far.
  */
@@ -71,6 +74,9 @@
 #define SAIF_FIFO_CAPACITY (1u << 18)   /* 256 KiB, ~1.5 s of audio */
 #define SAIF_SAMPLE_RATE   44100
 #define SAIF_FRAME_BYTES   4            /* stereo s16 */
+
+/* one DMA buffer (2048 bytes = 512 frames) per pacing tick */
+#define SAIF_PACE_NS (NANOSECONDS_PER_SECOND * 512 / SAIF_SAMPLE_RATE)
 
 static void saif_write_one(MxsSaifState *s, hwaddr addr, uint32_t value);
 
@@ -114,10 +120,19 @@ static void saif_timer_cb(void *opaque)
 {
     MxsSaifState *s = opaque;
 
-    saif_flush(s);
     if (saif_running(s)) {
+        /*
+         * Pace the circular DMA chain at the rate hardware would
+         * consume it: one buffer per tick, so the driver's
+         * completion IRQs (and its buffer refills) are spread over
+         * time instead of arriving in one burst at stream start.
+         */
+        if (s->dma) {
+            mxs_dma_pace(s->dma, s->dma_ch, 1);
+        }
+        saif_flush(s);
         timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  NANOSECONDS_PER_SECOND / 1000);
+                  SAIF_PACE_NS);
     }
 }
 
@@ -130,7 +145,7 @@ static void saif_maybe_start(MxsSaifState *s)
         audio_be_set_active_out(s->audio_be, s->voice, true);
     }
     timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              NANOSECONDS_PER_SECOND / 1000);
+              SAIF_PACE_NS);
 }
 
 static void saif_push_tx(MxsSaifState *s, const uint8_t *data, uint32_t len)

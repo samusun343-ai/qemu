@@ -467,6 +467,10 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         dma->i2c[1] = MXS_I2C(s->i2c[1]);
         dma->saif[0] = MXS_SAIF(s->stmp[5]);   /* saif0 */
         dma->saif[1] = MXS_SAIF(s->stmp[6]);   /* saif1 */
+        dma->saif[0]->dma = dma;
+        dma->saif[0]->dma_ch = 4;
+        dma->saif[1]->dma = dma;
+        dma->saif[1]->dma_ch = 5;
     }
 }
 

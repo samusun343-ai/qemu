@@ -388,12 +388,19 @@ struct MxsSaifState {
     AudioBackend *audio_be;
     SWVoiceOut *voice;
     QEMUTimer *timer;
+
+    /* APBX DMA channel carrying this port, for pacing resumes */
+    struct MxsDmaState *dma;
+    int dma_ch;
 };
 
 /* DMA client hooks (APBX channels 4 = SAIF0 TX, 5 = SAIF1 RX/TX) */
 void mxs_saif_dma_pio(MxsSaifState *s, int word_idx, uint32_t value);
 void mxs_saif_dma_data(MxsSaifState *s, bool to_device,
                        dma_addr_t bufaddr, uint32_t len);
+
+/* advance a streaming channel's circular chain (SAIF pacing timer) */
+void mxs_dma_pace(MxsDmaState *s, int ch, int budget);
 
 /* ------------------------------------------------------------------ */
 /* LRADC (hw/sharp-brain/lradc.c): ADC + 4-wire resistive touch        */
