@@ -130,38 +130,65 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
     /* full scale ~ 1.85V in 12 bits (LRADC range), values fit 18 bits */
     if (s->touch_down) {
         /*
-         * Panel transfer functions, measured from the reference
-         * implementation's conversion traces at three tap points
-         * (2026-11-14); they reproduce the raw ranges the guest's
-         * stored calibration expects.  In guest axis units
-         * (fx, fy in 0..32767):
-         *   Xval =  165 + 0.11639*fx - 0.00110*fy
-         *   Yval = 3959 - 0.00119*fx - 0.11277*fy
-         * i.e. neither axis spans the full 0..4095 (there is a
-         * ~160-count margin at the low end) and Y is inverted.
-         * The pressure phase senses Xval on XP and Yval on YM --
-         * returning a fixed "contact resistance" constant there
-         * (or full-scale 0..4095 linear values in the coordinate
-         * phases) makes the guest discard every point, so panel
-         * taps never reached GWES with the earlier model.
-         * s->x/s->y are in pixel units (x_max=853, y_max=479);
-         * fx = x*32767/853, fy = y*32767/479.
+         * Panel transfer functions, derived from the guest's own
+         * stored calibration (HKLM\HARDWARE\DEVICEMAP\TOUCH
+         * \CalibrationData in the eMMC image's registry hive):
+         *   "1931,1961 889,2993 888,906 2961,920 2958,3039"
+         * i.e. raw (1931,1961) at screen centre (427,240), and raw
+         * (889,2993) / (888,906) / (2961,920) / (2958,3039) at the
+         * four calibration points (171,96) / (171,384) /
+         * (683,384) / (683,96) -- the guest's calibration UI uses
+         * 20%-inset points, as verified from where its mapped
+         * points land (a 10%-inset reading of the same string
+         * compresses the right half of the panel into the middle
+         * tiles).  Solving raw = affine(screen) for those five
+         * points (residual <= 11 counts at every point):
+         *   Xval =  198 + 4.041*x
+         *   Yval = 3673 + 0.090*x - 7.247*y      (Y is inverted)
+         * s->x/s->y are in pixel units (x_max=853, y_max=479).
+         *
+         * The functions previously used here were fitted to the
+         * reference implementation's conversion traces instead and
+         * do not match this guest's stored calibration, and its
+         * pressure phase (below) returned the coordinate values,
+         * which made the guest discard every right-half point
+         * (taps with host x >= ~460 never acted, anywhere).  The
+         * stored calibration is the ground truth for this guest:
+         * it is what the real panel was calibrated against.
          */
-        uint32_t xv = 165 + (uint32_t)((uint64_t)s->x * 44713 / 10000)
-                          - (uint32_t)((uint64_t)s->y * 7525 / 100000);
-        uint32_t yv = 3959 - (uint32_t)((uint64_t)s->x * 4571 / 100000)
-                           - (uint32_t)((uint64_t)s->y * 77138 / 10000);
+        uint32_t xv = 198 + (uint32_t)((uint64_t)s->x * 4041 / 1000);
+        uint32_t yv = 3673 + (uint32_t)((uint64_t)s->x * 90 / 1000)
+                           - (uint32_t)((uint64_t)s->y * 7247 / 1000);
         if (x_mode && (ch == CH_YP || ch == CH_XP)) {
             return xv;
         }
         if (y_mode && (ch == CH_XM || ch == CH_XP)) {
             return yv;
         }
-        if (p_mode && ch == CH_XP) {
-            return xv;
-        }
-        if (p_mode && ch == CH_YM) {
-            return yv;
+        if (p_mode && (ch == CH_XP || ch == CH_YM)) {
+            /*
+             * Pressure phase (YP driven, XN driven): on the real
+             * panel the sensed terminals sit on one divider chain
+             *   YP -> Y film -> contact -> X film -> XN,
+             * with XP tapping the X film at the contact and YM
+             * tapping the Y film at the contact, so YM always reads
+             * higher than XP (the contact resistance drops between
+             * them).  Returning the coordinate values here instead
+             * (XP = Xval, YM = Yval) inverts that relation on the
+             * right half of the panel, and the guest discards every
+             * such point (measured 2026-11-14: points are accepted
+             * iff the pressure phase reads YM > XP).  Model the
+             * divider with equal plate resistances and a contact
+             * resistance of ~12% of one plate.
+             */
+            uint32_t fxm = (uint32_t)s->x * 1000 / 853;
+            uint32_t fym = (uint32_t)s->y * 1000 / 479;
+            uint32_t denom = fym + 120 + fxm;
+
+            if (ch == CH_XP) {
+                return 4095 * fxm / denom;
+            }
+            return 4095 * (120 + fxm) / denom;
         }
     }
 
