@@ -22,14 +22,22 @@
  *
  *   - PC keys that exist on the Brain (letters, space, return,
  *     backspace, arrows, shift, minus) close the corresponding
- *     matrix contact 1:1.
+ *     matrix contact 1:1.  Host Esc closes the 戻る contact (the key
+ *     SHARP's manuals call the "Escape key"), host Home closes the
+ *     Brain Home contact, and host Delete is an alias for the Brain
+ *     削除 (Backspace) contact.
  *   - Digits and punctuation only exist as the blue "symbols" legend
  *     of the QWERTY keys (記号 modifier + key); pressing them on the
  *     host holds the symbols contact plus the base key contact, which
  *     is exactly what typing them on the real device does.
  *   - Brain-specific dictionary keys that have no PC equivalent
- *     (戻る, History, My辞書, 一覧, 国語, 音声, 英和, 記号,
+ *     (History, My辞書, 一覧, 国語, 音声, 英和, 記号,
  *     marker, search) are reached through Ctrl+letter combinations.
+ *     戻る also has a combo (Ctrl+B) for keyboards without Esc.
+ *   - The mapping a key-down applies is latched per host key, so a
+ *     key-up always releases the same contacts even if Ctrl was
+ *     released first; contacts are refcounted because several host
+ *     keys can hold one contact (both Shifts, the symbols layer).
  */
 
 #include "qemu/osdep.h"
@@ -113,14 +121,18 @@ static const BrainKeyDef pwsh6_direct[KEY_CNT] = {
     [KEY_SPACE]                = { 6, 3, D },   /* Space */
     [KEY_ENTER]                = { 5, 3, D },   /* Enter */
     [KEY_KPENTER]              = { 5, 3, D },
-    [KEY_BACKSPACE]            = { 4, 0, D },   /* Backspace */
+    [KEY_BACKSPACE]            = { 4, 0, D },   /* Backspace (Brain 削除) */
+    [KEY_DELETE]               = { 4, 0, D },   /* alias: same 削除 contact */
     [KEY_UP]                   = { 3, 3, D },   /* Up */
     [KEY_DOWN]                 = { 1, 3, D },   /* Down */
     [KEY_LEFT]                 = { 2, 3, D },   /* Left */
     [KEY_RIGHT]                = { 4, 3, D },   /* Right */
     [KEY_LEFTSHIFT]            = { 4, 4, D },   /* Shift */
     [KEY_RIGHTSHIFT]           = { 4, 4, D },
-    [KEY_ESC]                  = { 3, 6, D },   /* Home (guest Esc-like key) */
+    [KEY_ESC]                  = { 0, 3, D },   /* 戻る: SHARP's own manuals
+                                                 * call this key the
+                                                 * "Escape key" (returns to
+                                                 * the previous screen) */
     [KEY_HOME]                 = { 3, 6, D },   /* Home */
     [KEY_PAGEUP]               = { 1, 4, D },   /* Page Up */
     [KEY_PAGEDOWN]             = { 3, 4, D },   /* Page Down */
