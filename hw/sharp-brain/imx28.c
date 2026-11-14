@@ -382,8 +382,9 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     /*
      * ROHM BU26154 audio codec on I2C0 (board wiring per brainux
      * imx28-brain.dtsi: the codec node sits under i2c@80058000).
-     * Presence/ACK stub only; the guest makes no I2C transfers at
-     * boot, so this is unexercised until WaveDev runs.
+     * Register model (bu26154.c); the guest makes no codec
+     * transfers at boot - WaveDev programs it over APBX-DMA I2C
+     * at first playback.
      */
     i2c_slave_create_simple(MXS_I2C(s->i2c[0])->bus, TYPE_BU26154,
                             BU26154_I2C_ADDR);
