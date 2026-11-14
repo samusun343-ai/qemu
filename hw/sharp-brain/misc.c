@@ -259,16 +259,47 @@ static uint8_t *pxp_host_ptr(hwaddr pa, uint32_t len)
 static void pxp_process(hwaddr next)
 {
     uint8_t set[0x100];
-    uint32_t src_pa, dst_pa;
+    uint32_t ctrl, scale, src_pa, dst_pa;
     uint8_t *src, *dst;
     int x, y;
 
     if (!pxp_read_guest(next, set, sizeof(set))) {
         return;
     }
+    memcpy(&ctrl, set + 0x000, 4);
     memcpy(&dst_pa, set + 0x004, 4);
     memcpy(&src_pa, set + 0x010, 4);
+    memcpy(&scale, set + 0x028, 4);
     if (!dst_pa || !src_pa) {
+        return;
+    }
+    if (ctrl != 0x00084147 || scale != 0x10001000) {
+        /*
+         * A different operation than the usual surface->combine
+         * rotation: observed when ATR CALL starts, where the driver
+         * programs the inverse combine->framebuffer copy (PS_BUF =
+         * combine, OUT_BUF = LCD scanout buffer, CTRL 0xca147,
+         * PS_SCALE 0x0aaa0aaa). The fixed rotation above writes
+         * 800 rows at stride 1600 (1.28 MB) wherever OUT_BUF points;
+         * aimed at the 768 KB framebuffer that overruns into the
+         * kernel image and the guest dies in an abort loop. Do what
+         * the guest's own copy loop does in the normal path instead:
+         * repack the combine (800 rows of 480 active pixels at
+         * stride 1600) into the framebuffer at stride 960, bounded
+         * to the 768 KB frame. The 2/3 scale field is not modelled;
+         * the copy fills the whole frame.
+         */
+        src = pxp_host_ptr(src_pa, 800 * 800 * 2);
+        dst = pxp_host_ptr(dst_pa, 800 * 480 * 2);
+        if (!src || !dst) {
+            return;
+        }
+        for (y = 0; y < 800; y++) {
+            memcpy(dst + y * 960, src + y * 1600, 960);
+        }
+        qemu_log("pxp: blit src=0x%08x dst=0x%08x "
+                 "(combine -> fb repack, ctrl=0x%08x scale=0x%08x)\n",
+                 src_pa, dst_pa, ctrl, scale);
         return;
     }
     src = pxp_host_ptr(src_pa, 800 * 480 * 2);
