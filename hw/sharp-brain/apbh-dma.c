@@ -217,6 +217,16 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                 mxs_gpmi_dma_pio(gpmi, -1, 0);
                 mxs_gpmi_dma_data(gpmi, to_device, bufaddr, xfer);
             } else if (i2c) {
+                /*
+                 * A data descriptor can carry PIO words (the WinCE
+                 * DDK puts the I2C CTRL0 image there); the hardware
+                 * programs them into the controller before the data
+                 * phase, and the data phase itself is the trigger
+                 * (RUN is never set in the DMA CTRL0 images).
+                 */
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_i2c_dma_pio(i2c, i, pio[i]);
+                }
                 mxs_i2c_dma_data(i2c, to_device, bufaddr, xfer);
             } else if (!s->is_apbx && ch == 13 && s->lcdif) {
                 mxs_lcdif_dma_data(s->lcdif, to_device, bufaddr, xfer);

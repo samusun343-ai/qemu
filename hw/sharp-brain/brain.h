@@ -350,6 +350,12 @@ struct MxsI2cState {
     /* a RUN programmed through a DMA PIO descriptor waits for the
      * data descriptor before the synchronous transfer executes */
     bool run_pending;
+
+    /* DMA combined-read state: an address-for-read payload arms
+     * the slave; the following WRITE data descriptor clocks the
+     * bytes in (see mxs_i2c_dma_data in i2c.c) */
+    uint8_t dma_read_addr;
+    bool dma_read_armed;
 };
 
 /* DMA client hooks (channels 6/7 of the APBX DMA) */

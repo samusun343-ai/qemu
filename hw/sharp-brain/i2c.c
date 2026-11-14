@@ -15,9 +15,11 @@
  * not modelled) reports NO_SLAVE_ACK, which the boot loader
  * handles gracefully.
  *
- * When the APBX DMA drives the controller, a PIO descriptor programs
- * CTRL0/CTRL1 (RUN arms but does not start the transfer); the
- * following data descriptor moves the payload and executes it.
+ * When the APBX DMA drives the controller, each data descriptor
+ * carries a PIO word programming CTRL0 (never with RUN - the data
+ * phase itself is the trigger) and a payload starting with the
+ * 8-bit slave address byte; see mxs_i2c_dma_data for the phase
+ * protocol the WinCE DDK uses.
  *
  * Registers use the stmp 16-byte layout (REG/SET/CLR/TOG).
  */
@@ -48,7 +50,7 @@
 #define BM_CTRL0_ACKNOWLEDGE (1u << 26)
 #define BM_CTRL0_NAK_ON_LAST (1u << 25)
 #define BM_CTRL0_MASTER_MODE (1u << 17)
-#define BM_CTRL0_DIRECTION   (1u << 16)   /* 1 = read */
+#define BM_CTRL0_DIRECTION   (1u << 16)   /* mirrors the addr R/W bit */
 #define BM_CTRL0_XFER_COUNT  0x0000ffffu
 
 #define BM_CTRL1_IRQ_EN      0x0000ff00u
@@ -88,7 +90,12 @@ static void i2c_data_unpack(MxsI2cState *s, uint8_t *buf, uint32_t len)
 static void i2c_run(MxsI2cState *s)
 {
     uint32_t count = s->ctrl0 & BM_CTRL0_XFER_COUNT;
-    bool read = s->ctrl0 & BM_CTRL0_DIRECTION;
+    /* the transfer direction is the R/W bit of the address byte
+     * itself (the first byte of the data stream), exactly as on the
+     * wire; the WinCE DDK's DMA descriptors confirm this - their
+     * CTRL0 images set the bit our old header called DIRECTION on
+     * *send* phases, so branch on the address byte, not on CTRL0 */
+    bool read = (s->data[0] >> 24) & 1;
     uint8_t buf[16];
     int ret = 0;
 
@@ -293,36 +300,80 @@ void mxs_i2c_dma_pio(MxsI2cState *s, int word_idx, uint32_t value)
     i2c_write_one(s, word_idx * 0x10, 0, value, true);
 }
 
+/*
+ * Execute one DMA data phase.  The WinCE DDK drives every codec /
+ * slave transfer this way (observed live from wavedev2_BU26154.dll):
+ * each data descriptor carries one PIO word programming CTRL0
+ * (XFER_COUNT, MASTER_MODE; RUN is never set - the DMA data phase
+ * itself is the trigger) and a payload whose first byte is the
+ * 8-bit slave address on the wire.  A combined register read is
+ * three descriptors:
+ *
+ *   READ  (mem->dev) [addr+W, index]     set the slave's pointer
+ *   READ  (mem->dev) [addr+R]            repeated-start read address
+ *   WRITE (dev->mem) [data...]           clock the bytes in
+ *
+ * An address byte with R/W = 1 therefore only *arms* the read; the
+ * following WRITE descriptor clocks the data in from that slave.
+ * An address byte with R/W = 0 runs a complete send phase at once.
+ */
 void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
                       dma_addr_t bufaddr, uint32_t len)
 {
     uint8_t buf[16];
+    uint32_t count = s->ctrl0 & BM_CTRL0_XFER_COUNT;
 
     if (len > sizeof(buf)) {
         len = sizeof(buf);
     }
 
     if (to_device) {
-        /* READ descriptor: memory -> controller DATA0-3, then the
-         * armed transfer transmits them */
         memset(buf, 0, sizeof(buf));
         address_space_read(&address_space_memory, bufaddr,
                            MEMTXATTRS_UNSPECIFIED, buf, len);
-        i2c_data_pack(s, buf, len);
-        if (s->run_pending) {
-            i2c_run(s);
+        if (len == 0) {
+            goto done;
         }
+        if (buf[0] & 1) {
+            /* address-for-read: arm, the WRITE descriptor executes */
+            s->dma_read_addr = buf[0] >> 1;
+            s->dma_read_armed = true;
+            goto done;
+        }
+        if (i2c_start_send(s->bus, buf[0] >> 1) < 0) {
+            s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
+            goto done;
+        }
+        for (uint32_t i = 1; i < len; i++) {
+            if (i2c_send(s->bus, buf[i]) < 0) {
+                s->stat |= BM_STAT_GOT_A_NAK;
+                break;
+            }
+        }
+        i2c_end_transfer(s->bus);
     } else {
-        /* WRITE descriptor: controller -> memory.  Execute a pending
-         * receive first so DATA0-3 hold the payload. */
-        if (s->run_pending) {
-            i2c_run(s);
+        if (count == 0 || count > len) {
+            count = len;
         }
         memset(buf, 0, sizeof(buf));
-        i2c_data_unpack(s, buf, sizeof(buf));
+        if (s->dma_read_armed) {
+            if (i2c_start_recv(s->bus, s->dma_read_addr) < 0) {
+                s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
+            } else {
+                for (uint32_t i = 0; i < count; i++) {
+                    buf[i] = i2c_recv(s->bus);
+                }
+                i2c_end_transfer(s->bus);
+            }
+            s->dma_read_armed = false;
+        }
         address_space_write(&address_space_memory, bufaddr,
                             MEMTXATTRS_UNSPECIFIED, buf, len);
     }
+
+done:
+    s->stat |= BM_STAT_DATA_ENGINE_CMPLT_IRQ_SUMMARY;
+    i2c_update_irq(s);
 }
 
 /* ------------------------------------------------------------------ */
@@ -346,6 +397,8 @@ static void i2c_reset(DeviceState *dev)
     s->queuectrl = s->queueend = s->queuecmd = s->queuedata = 0;
     memset(s->data, 0, sizeof(s->data));
     s->run_pending = false;
+    s->dma_read_addr = 0;
+    s->dma_read_armed = false;
     qemu_set_irq(s->irq, 0);
 }
 
