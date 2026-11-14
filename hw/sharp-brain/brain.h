@@ -17,6 +17,7 @@
 #include "hw/sd/sd.h"
 #include "system/dma.h"
 #include "qom/object.h"
+#include "standard-headers/linux/input-event-codes.h"
 
 /* ------------------------------------------------------------------ */
 /* i.MX28 memory map                                                  */
@@ -485,6 +486,21 @@ struct BrainKbdState {
     uint32_t row_doe;           /* GPIO4 output-enable: rows the guest drives */
     uint64_t pressed;           /* bitmask: bit = row * BRAIN_KBD_COLS + col */
     unsigned int ctrl_held;     /* host Ctrl keys currently down */
+
+    /*
+     * The mapping applied by each host key's key-down, latched so the
+     * matching key-up releases exactly the same contacts even when
+     * the host releases Ctrl before the key (or presses it after).
+     * Indexed by linux keycode; flags == 0 means "not down".
+     */
+    BrainKeyDef active[KEY_CNT];
+    /*
+     * Per-contact hold count: several host keys can close the same
+     * contact (Left/Right Shift, Enter/KPEnter, every symbols-layer
+     * key shares the 記号 contact); the contact opens only when the
+     * last holder releases.
+     */
+    uint8_t contact_refs[BRAIN_KBD_ROWS * BRAIN_KBD_COLS];
 };
 
 /* boot ROM emulation (hw/sharp-brain/bootrom.c) */

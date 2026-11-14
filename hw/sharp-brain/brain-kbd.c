@@ -292,15 +292,33 @@ static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
     brain_kbd_recalc(s);
 }
 
+/*
+ * Close or open one matrix contact, reference-counted: several host
+ * keys can hold the same contact at once (Left/Right Shift both mean
+ * the Brain Shift key, Enter and KPEnter are the same contact, and
+ * every symbols-layer key holds the 記号 contact in addition to its
+ * own).  The contact opens only when its last holder releases.
+ */
 static void brain_kbd_set_contact(BrainKbdState *s, int r, int c, bool down)
 {
+    int idx;
+
     if (r < 0 || c < 0 || r >= BRAIN_KBD_ROWS || c >= BRAIN_KBD_COLS) {
         return;
     }
+    idx = r * BRAIN_KBD_COLS + c;
     if (down) {
+        if (s->contact_refs[idx] < UINT8_MAX) {
+            s->contact_refs[idx]++;
+        }
         s->pressed |= CONTACT_BIT(r, c);
     } else {
-        s->pressed &= ~CONTACT_BIT(r, c);
+        if (s->contact_refs[idx] > 0) {
+            s->contact_refs[idx]--;
+        }
+        if (s->contact_refs[idx] == 0) {
+            s->pressed &= ~CONTACT_BIT(r, c);
+        }
     }
 }
 
@@ -348,11 +366,39 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
 
+    if (!down) {
+        /*
+         * Release exactly the contacts the matching key-down closed.
+         * Frontends do not guarantee that modifiers are released
+         * last: if the user lets go of Ctrl before the letter key,
+         * looking the letter up again here (with Ctrl now up) would
+         * release the plain letter contact -- which was never
+         * closed -- and leave the combo's contact (e.g. 戻る) closed
+         * forever.  A stuck contact keeps its column low, so the
+         * guest sees the key held down indefinitely.
+         */
+        e = &s->active[key];
+        if (e->flags == 0) {
+            return;
+        }
+        brain_kbd_apply(s, e, false);
+        s->active[key].flags = 0;
+        brain_kbd_recalc(s);
+        return;
+    }
+
+    if (s->active[key].flags != 0) {
+        return;                     /* autorepeat: already latched */
+    }
     e = &s->layout->direct[key];
     if (s->ctrl_held && s->layout->combo[key].flags != 0) {
         e = &s->layout->combo[key];
     }
-    brain_kbd_apply(s, e, down);
+    if (e->flags == 0) {
+        return;
+    }
+    s->active[key] = *e;
+    brain_kbd_apply(s, e, true);
     brain_kbd_recalc(s);
 }
 
@@ -413,6 +459,8 @@ static void brain_kbd_reset(DeviceState *dev)
 
     s->pressed = 0;
     s->ctrl_held = 0;
+    memset(s->active, 0, sizeof(s->active));
+    memset(s->contact_refs, 0, sizeof(s->contact_refs));
     brain_kbd_recalc(s);
 }
 
