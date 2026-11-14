@@ -424,6 +424,13 @@ uint32_t mxs_pinctrl_get_doe(DeviceState *dev, int bank);
 #define TYPE_BRAIN_KBD "brain-kbd"
 OBJECT_DECLARE_SIMPLE_TYPE(BrainKbdState, BRAIN_KBD)
 
+#define TYPE_BRAIN_EDNA2_MB "brain-edna2-mb"
+OBJECT_DECLARE_SIMPLE_TYPE(BrainEdna2MbState, BRAIN_EDNA2_MB)
+
+/* EDNA2 sub-MCU mailbox window (carved out of the DRAM aperture) */
+#define BRAIN_EDNA2_MB_BASE    0x400ea000
+#define BRAIN_EDNA2_MB_SIZE    0x1000
+
 /*
  * Host key -> matrix contact mapping.  Tables are indexed by linux
  * keycode (KEY_CNT entries); the QEMU input core delivers host key

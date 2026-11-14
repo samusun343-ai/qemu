@@ -32,6 +32,7 @@
 typedef struct BrainMachineState {
     Imx28State soc;
     DeviceState *kbd;
+    DeviceState *edna2_mb;
 } BrainMachineState;
 
 static void brain_init(MachineState *machine)
@@ -70,6 +71,21 @@ static void brain_init(MachineState *machine)
     /* DRAM at 0x40000000 */
     memory_region_add_subregion(get_system_memory(), IMX28_DRAM_BASE,
                                 machine->ram);
+
+    /*
+     * EDNA2 sub-MCU mailbox: a 4 KiB shared window inside the DRAM
+     * aperture at 0x400ea000.  It must shadow DRAM (priority 1, as in
+     * the reference machine's memory tree): the guest exchanges data
+     * blocks with the sub-MCU here, and command completion plus the
+     * response data are posted by the MCU side, never by the guest.
+     */
+    s->edna2_mb = qdev_new(TYPE_BRAIN_EDNA2_MB);
+    object_property_add_child(OBJECT(machine), "edna2-mb",
+                              OBJECT(s->edna2_mb));
+    sysbus_realize(SYS_BUS_DEVICE(s->edna2_mb), &error_fatal);
+    memory_region_add_subregion_overlap(
+        get_system_memory(), BRAIN_EDNA2_MB_BASE,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(s->edna2_mb), 0), 1);
 
     /* eMMC on SSP0 */
     di = drive_get(IF_SD, 0, 0);

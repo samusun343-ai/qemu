@@ -1,6 +1,7 @@
 system_ss.add(when: 'CONFIG_SHARP_BRAIN', if_true: files(
   'brain.c',
   'brain-kbd.c',
+  'edna2-mb.c',
   'imx28.c',
   'bootrom.c',
   'icoll.c',
