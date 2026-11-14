@@ -277,17 +277,144 @@ static void pxp_process(hwaddr next)
         /*
          * A different operation than the usual surface->combine
          * rotation: observed when ATR CALL starts, where the driver
-         * programs the inverse combine->framebuffer copy (PS_BUF =
+         * programs a combine->framebuffer composite (PS_BUF =
          * combine, OUT_BUF = LCD scanout buffer, CTRL 0xca147,
          * PS_SCALE 0x0aaa0aaa). The fixed rotation above writes
          * 800 rows at stride 1600 (1.28 MB) wherever OUT_BUF points;
          * aimed at the 768 KB framebuffer that overruns into the
-         * kernel image and the guest dies in an abort loop. Do what
-         * the guest's own copy loop does in the normal path instead:
-         * repack the combine (800 rows of 480 active pixels at
-         * stride 1600) into the framebuffer at stride 960, bounded
-         * to the 768 KB frame. The 2/3 scale field is not modelled;
-         * the copy fills the whole frame.
+         * kernel image and the guest dies in an abort loop.
+         *
+         * The set carries its geometry in two packed rect words at
+         * +0x01c/+0x024 whose four byte fields are pixel counts in
+         * units of 8 (decoded from the stopped-guest snapshot in
+         * p7-atr-scale-2026-11-15.md):
+         *   +0x01c: out offset (x, y), PS size (w, h)
+         *   +0x024: PS offset (x, y), out size (w, h)
+         * For ATR: out at (80, 0), PS 480x320, out 720x480. PS_SCALE
+         * holds the input/output ratio in 4.12 fixed point per axis
+         * (0x0aaa = 2/3), i.e. the output is the input upscaled by
+         * 3/2 -- which is exactly what the rect words say (480x320
+         * -> 720x480) and matches the buffer contents: the combine
+         * holds a packed 480x320 landscape frame (stride 960) with
+         * the app's user-data UI, not a 720x480 one. Two overlay
+         * groups follow the same rect packing:
+         *   +0x040 buf, +0x044 rect, +0x048 gate
+         *   +0x050 buf, +0x054 rect, +0x058 gate
+         * For ATR, +0x050 is an 80x480 sidebar strip (volume /
+         * example / clear touchkey labels, read verbatim from its
+         * buffer) at (0, 0) and +0x040 an 80x144 alarm tile at
+         * (0, 336); the strip's gate word is 0x41, the tile's 0x40,
+         * so bit 0 of the gate word is taken as "composited".
+         * Overlays are copied verbatim (no alpha model).
+         *
+         * Rects are in the device's landscape coordinates; the
+         * framebuffer itself is the portrait panel image (480 px
+         * rows at stride 960, main area = rows 0..799), and the
+         * panel transform is fb[row = landscape x][479 - landscape
+         * y] (verified pixel-exact against a live screendump), so
+         * each landscape pixel is written through that mapping.
+         * The sidebar rows 800..853 of the frame are not touched.
+         */
+        uint32_t w01c, w024;
+        int out_x, out_y, in_w, in_h, in_x, in_y, out_w, out_h;
+
+        memcpy(&w01c, set + 0x01c, 4);
+        memcpy(&w024, set + 0x024, 4);
+        out_x = ((w01c >> 24) & 0xff) * 8;
+        out_y = ((w01c >> 16) & 0xff) * 8;
+        in_w  = ((w01c >>  8) & 0xff) * 8;
+        in_h  = ( w01c        & 0xff) * 8;
+        in_x  = ((w024 >> 24) & 0xff) * 8;
+        in_y  = ((w024 >> 16) & 0xff) * 8;
+        out_w = ((w024 >>  8) & 0xff) * 8;
+        out_h = ( w024        & 0xff) * 8;
+        if (in_w > 0 && in_h > 0 && out_w > 0 && out_h > 0 &&
+            in_x + in_w <= 800 && in_y + in_h <= 800) {
+            src = pxp_host_ptr(src_pa, (in_y + in_h) * in_w * 2);
+            dst = pxp_host_ptr(dst_pa, 800 * 480 * 2);
+            if (src && dst) {
+                uint32_t scx = scale & 0xffff, scy = scale >> 16;
+                int ox, oy, g;
+
+                /* PS: nearest-neighbour scale into the out rect. */
+                for (oy = 0; oy < out_h; oy++) {
+                    int ly = out_y + oy;
+                    int sy = in_y + (int)((oy * scy) >> 12);
+                    const uint16_t *srow =
+                        (const uint16_t *)(src + sy * in_w * 2);
+                    if (ly < 0 || ly >= 480 || sy >= in_y + in_h) {
+                        continue;
+                    }
+                    for (ox = 0; ox < out_w; ox++) {
+                        int lx = out_x + ox;
+                        int sx = in_x + (int)((ox * scx) >> 12);
+                        uint16_t *dpx;
+
+                        if (lx < 0 || lx >= 800 || sx >= in_x + in_w) {
+                            continue;
+                        }
+                        dpx = (uint16_t *)(dst + lx * 960 +
+                                           (479 - ly) * 2);
+                        *dpx = srow[sx];
+                    }
+                }
+                /* Overlay groups at +0x040 / +0x050. */
+                for (g = 0; g < 2; g++) {
+                    uint32_t obuf, orect, ogate;
+                    const uint8_t *osrc;
+                    int gx, gy, gw, gh, row;
+
+                    memcpy(&obuf, set + 0x040 + g * 0x10, 4);
+                    memcpy(&orect, set + 0x044 + g * 0x10, 4);
+                    memcpy(&ogate, set + 0x048 + g * 0x10, 4);
+                    if (!obuf || !(ogate & 1)) {
+                        continue;
+                    }
+                    gx = ((orect >> 24) & 0xff) * 8;
+                    gy = ((orect >> 16) & 0xff) * 8;
+                    gw = ((orect >>  8) & 0xff) * 8;
+                    gh = ( orect        & 0xff) * 8;
+                    if (gw <= 0 || gh <= 0) {
+                        continue;
+                    }
+                    osrc = pxp_host_ptr(obuf, gw * gh * 2);
+                    if (!osrc) {
+                        continue;
+                    }
+                    for (row = 0; row < gh; row++) {
+                        int ly = gy + row;
+                        const uint16_t *srow =
+                            (const uint16_t *)(osrc + row * gw * 2);
+                        int col;
+
+                        if (ly < 0 || ly >= 480) {
+                            continue;
+                        }
+                        for (col = 0; col < gw; col++) {
+                            int lx = gx + col;
+                            uint16_t *dpx;
+
+                            if (lx < 0 || lx >= 800) {
+                                continue;
+                            }
+                            dpx = (uint16_t *)(dst + lx * 960 +
+                                               (479 - ly) * 2);
+                            *dpx = srow[col];
+                        }
+                    }
+                }
+                qemu_log("pxp: blit src=0x%08x dst=0x%08x "
+                         "(scaled composite %dx%d -> %dx%d @(%d,%d), "
+                         "ctrl=0x%08x scale=0x%08x)\n",
+                         src_pa, dst_pa, in_w, in_h, out_w, out_h,
+                         out_x, out_y, ctrl, scale);
+                return;
+            }
+        }
+        /*
+         * Fallback for sets whose geometry does not decode: the
+         * bounded repack from a750cd0e, which at least cannot
+         * overrun the framebuffer.
          */
         src = pxp_host_ptr(src_pa, 800 * 800 * 2);
         dst = pxp_host_ptr(dst_pa, 800 * 480 * 2);
