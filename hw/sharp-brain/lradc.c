@@ -129,14 +129,39 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
 
     /* full scale ~ 1.85V in 12 bits (LRADC range), values fit 18 bits */
     if (s->touch_down) {
-        if (x_mode && ch == CH_YP) {
-            return ((uint64_t)s->x * 4095) / MAX(s->x_max, 1);
+        /*
+         * Panel transfer functions, measured from the reference
+         * implementation's conversion traces at three tap points
+         * (2026-11-14); they reproduce the raw ranges the guest's
+         * stored calibration expects.  In guest axis units
+         * (fx, fy in 0..32767):
+         *   Xval =  165 + 0.11639*fx - 0.00110*fy
+         *   Yval = 3959 - 0.00119*fx - 0.11277*fy
+         * i.e. neither axis spans the full 0..4095 (there is a
+         * ~160-count margin at the low end) and Y is inverted.
+         * The pressure phase senses Xval on XP and Yval on YM --
+         * returning a fixed "contact resistance" constant there
+         * (or full-scale 0..4095 linear values in the coordinate
+         * phases) makes the guest discard every point, so panel
+         * taps never reached GWES with the earlier model.
+         * s->x/s->y are in pixel units (x_max=853, y_max=479);
+         * fx = x*32767/853, fy = y*32767/479.
+         */
+        uint32_t xv = 165 + (uint32_t)((uint64_t)s->x * 44713 / 10000)
+                          - (uint32_t)((uint64_t)s->y * 7525 / 100000);
+        uint32_t yv = 3959 - (uint32_t)((uint64_t)s->x * 4571 / 100000)
+                           - (uint32_t)((uint64_t)s->y * 77138 / 10000);
+        if (x_mode && (ch == CH_YP || ch == CH_XP)) {
+            return xv;
         }
         if (y_mode && (ch == CH_XM || ch == CH_XP)) {
-            return ((uint64_t)s->y * 4095) / MAX(s->y_max, 1);
+            return yv;
         }
-        if (p_mode && (ch == CH_YM || ch == CH_XP)) {
-            return 100;       /* some contact resistance */
+        if (p_mode && ch == CH_XP) {
+            return xv;
+        }
+        if (p_mode && ch == CH_YM) {
+            return yv;
         }
     }
 
