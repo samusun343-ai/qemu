@@ -166,11 +166,27 @@ Keys map to a standard PC-style map plus a `symbols` key
 blue legends (numbers/symbols) - the same trick the real
 hardware uses.
 
+The physical PW-SH6 keyboard has 46 keys (linux-brain
+`imx28-pwsh6.dts`, including the two entries its keymap only comments
+-- Modoru at row0 col3 and PageDown at row3 col4; key names follow
+SHARP's PW-SS6/SH6/SB6 Quick Reference):
+
+    row0  V        H        Y         戻る     C        D       -
+    row1  M        K        履歴      Down     PageUp   F       E
+    row2  B        J        U         Left     記号     X       -
+    row3  N        I        My辞書    Up       PageDown Q       Home
+    row4  削除     G        T         Right    Shift    A       -
+    row5  P        O        一覧      Enter    Z        W       国語
+    row6  Minus    L        R         Space    音声     S       英和
+
 Host keyboard -> guest mapping policy (per project requirements):
-plain PC keys map 1:1; Brain-specific keys that have no PC equivalent
-(dictionary keys: Home/Esc, History, My辞書, Ichiran, Kokugo, 音声,
-英和, marker, jump...) are reached through key combinations
-(see `brain-kbd.c` for the exact table).
+plain PC keys map 1:1 where the Brain has the same key; Brain keys
+with no PC equivalent are reached through Ctrl+letter combinations;
+the symbols layer reproduces the blue legends by holding the 記号
+contact together with the base key, exactly like the real keyboard.
+Host keys with no Brain counterpart (Tab, F1-F12, CapsLock, End,
+...) are intentionally unmapped -- the matrix has no contact for
+them.  Power is not a matrix key at all (it is the PSWITCH pin).
 
 Complete host-key table (brain-kbd.c, layout "pw-sh6"):
 
@@ -178,15 +194,17 @@ Complete host-key table (brain-kbd.c, layout "pw-sh6"):
 |---|---|---|
 | A..Z (QWERTY letters) | direct 1:1 | the 26 matrix letter keys |
 | Space, Enter/KpEnter, Backspace | direct | |
+| Delete | row4 col0 | alias for the Brain 削除 (Backspace) key |
 | Up/Down/Left/Right | direct | the 4-way cursor pad |
-| Left/Right Shift | direct | Shift |
-| Esc / Home | row3 col6 | Brain Home key |
-| PageUp / PageDown | direct | |
+| Left/Right Shift | direct | Shift (either one; refcounted) |
+| Esc | row0 col3 | 戻る -- SHARP calls this key the "Escape key" |
+| Home | row3 col6 | Brain Home key |
+| PageUp / PageDown | direct | row1 col4 / row3 col4 |
 | Insert | row1 col2 | alias for History |
 | Minus / KpMinus | direct | |
 | 1..0, Kp0..Kp9 | symbols layer | 記号 + Q/W/E/R/T/Y/U/I/O/P (blue legends) |
-| ` = ~ [ ] \ ; ' , . / | symbols layer | 記号 + base key |
-| Ctrl+B | row0 col3 | 戻る (back) |
+| ` = [ ] \ ; ' , . / | symbols layer | 記号 + base key (blue legends) |
+| Ctrl+B | row0 col3 | 戻る (back) -- same contact as Esc |
 | Ctrl+H | row1 col2 | 履歴 History |
 | Ctrl+D | row3 col2 | マイ辞書 (my dictionary) |
 | Ctrl+L | row5 col2 | 一覧 (list) |
@@ -197,11 +215,28 @@ Complete host-key table (brain-kbd.c, layout "pw-sh6"):
 | Ctrl+M | row5 col2 + symbols | マーカー (marker) |
 | Ctrl+F | row3 col6 + symbols | 検索 (search) |
 
-Everything on the physical PW-SH6 keyboard is reachable this way:
-the matrix (from the linux-brain device tree) contains only letters,
-Space/Enter/Backspace/Shift/Minus, the cursor pad, Home, PageUp/Down,
-History, マイ辞書, 一覧, 国語, 英和, 音声, 記号 and the two
-blue-legend derivatives マーカー/検索.
+Everything on the physical PW-SH6 keyboard is reachable this way.
+The symbols layer also has function-key legends -- 検索 (symbols +
+Home), マーカー (symbols + 一覧), the 英和/和英 toggle (symbols +
+英和) and 文字切替 (symbols + 音声) -- reachable by holding 記号
+(Ctrl+S) and then pressing the corresponding key/combo.
+
+Two model behaviours worth knowing:
+
+* Key-down mappings are latched per host key and contacts are
+  refcounted.  Releasing Ctrl before the letter key (or pressing it
+  after) therefore cannot leave a combo contact stuck closed, and
+  overlapping symbols-layer keys keep the 記号 contact held until
+  the last one is released.
+* In the WinCE search fields the 記号 key is an app-visible
+  keystroke, not a silent modifier: a bare press inserts "～" (the
+  blank-word operator, as in SHARP's manual: the Symbol key "enters
+  symbols such as ? or ～"), so a host digit keypress appears there
+  as "～" followed by the plain letter.  That is the guest software
+  treating the physically faithful chord; the model delivers both
+  contacts together, as the real keyboard does.  (Linux's
+  brain-kbd-gpio instead folds the symbols layer in the driver and
+  never reports the 記号 key itself.)
 
 ## WinCE suspend/resume (works end to end)
 
