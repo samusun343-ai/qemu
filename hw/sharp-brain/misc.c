@@ -256,6 +256,40 @@ static uint8_t *pxp_host_ptr(hwaddr pa, uint32_t len)
     return memory_region_get_ram_ptr(sec.mr) + sec.offset_within_region;
 }
 
+/*
+ * Packed YUV 4:2:2 -> RGB565, the PXP's CSC for S0_FORMAT YUV422
+ * register sets (HW_PXP_CTRL bits 15:12; i.MX23/28 PXP: 0x8 =
+ * YUV422, 0xa = the UYVY byte order the Brain driver uses).
+ * Byte order in memory is [U, Y0, V, Y1] for 0xa and [Y0, U, Y1, V]
+ * for 0x8; both pixels of a pair share the pair's chroma. BT.601
+ * full-range coefficients -- with these, converting the guest's
+ * UYVY combine frame reproduces its RGB surface pixel-exactly for
+ * 92% of pixels (rest: surface edits after the last transfer).
+ */
+static uint16_t pxp_yuv422_to_rgb565(const uint8_t *row, int x,
+                                     bool uyvy)
+{
+    const uint8_t *pair = row + (x & ~1) * 2;
+    int y, u, v, r, g, b;
+
+    if (uyvy) {
+        u = pair[0];
+        y = pair[1 + (x & 1) * 2];
+        v = pair[2];
+    } else {
+        y = pair[(x & 1) * 2];
+        u = pair[1];
+        v = pair[3];
+    }
+    r = y + (((v - 128) * 359) >> 8);                    /* 1.402 */
+    g = y - (((u - 128) * 88) >> 8) - (((v - 128) * 183) >> 8);
+    b = y + (((u - 128) * 454) >> 8);                    /* 1.772 */
+    r = CLAMP(r, 0, 255);
+    g = CLAMP(g, 0, 255);
+    b = CLAMP(b, 0, 255);
+    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
 static void pxp_process(hwaddr next)
 {
     uint8_t set[0x100];
@@ -334,9 +368,22 @@ static void pxp_process(hwaddr next)
             dst = pxp_host_ptr(dst_pa, 800 * 480 * 2);
             if (src && dst) {
                 uint32_t scx = scale & 0xffff, scy = scale >> 16;
+                int s0_format = (ctrl >> 12) & 0xf;
+                bool ps_yuv = (s0_format == 0x8 || s0_format == 0xa);
                 int ox, oy, g;
 
-                /* PS: nearest-neighbour scale into the out rect. */
+                /*
+                 * PS: nearest-neighbour scale into the out rect.
+                 * A YUV422 S0 (CTRL 0xca147 for ATR CALL) is run
+                 * through the CSC on the way: the guest stores the
+                 * app frame in the combine as packed UYVY and the
+                 * real PXP converts it back to RGB565 (the SCALE
+                 * bit is only defined for YUV sources). Copying it
+                 * verbatim, as this branch used to, displays the
+                 * UYVY bytes as RGB565 -- rainbow banding in every
+                 * textured area (p9-atr-color-2026-11-15.md).
+                 * RGB565 S0 sets (0x4) keep the verbatim path.
+                 */
                 for (oy = 0; oy < out_h; oy++) {
                     int ly = out_y + oy;
                     int sy = in_y + (int)((oy * scy) >> 12);
@@ -355,7 +402,13 @@ static void pxp_process(hwaddr next)
                         }
                         dpx = (uint16_t *)(dst + lx * 960 +
                                            (479 - ly) * 2);
-                        *dpx = srow[sx];
+                        if (ps_yuv) {
+                            *dpx = pxp_yuv422_to_rgb565(
+                                (const uint8_t *)srow, sx,
+                                s0_format == 0xa);
+                        } else {
+                            *dpx = srow[sx];
+                        }
                     }
                 }
                 /* Overlay groups at +0x040 / +0x050. */
