@@ -137,6 +137,7 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
         MxsGpmiState *gpmi = (!s->is_apbx && ch >= 4 && ch <= 11)
                                  ? s->gpmi : NULL;
         MxsI2cState *i2c = NULL;
+        MxsSaifState *saif = NULL;
 
         /*
          * The hardware consumes one semaphore slot per descriptor as it
@@ -153,6 +154,10 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                 i2c = s->i2c[0];
             } else if (ch == MXS_APBX_CH_I2C1) {
                 i2c = s->i2c[1];
+            } else if (ch == 4) {
+                saif = s->saif[0];   /* SAIF0 transmit */
+            } else if (ch == 5) {
+                saif = s->saif[1];   /* SAIF1 receive */
             }
         }
 
@@ -183,6 +188,10 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
             } else if (i2c) {
                 for (unsigned i = 0; i < pio_num; i++) {
                     mxs_i2c_dma_pio(i2c, i, pio[i]);
+                }
+            } else if (saif) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_saif_dma_pio(saif, i, pio[i]);
                 }
             } else {
                 qemu_log_mask(LOG_UNIMP,
@@ -228,6 +237,11 @@ static void mxs_dma_run_channel(MxsDmaState *s, int ch)
                     mxs_i2c_dma_pio(i2c, i, pio[i]);
                 }
                 mxs_i2c_dma_data(i2c, to_device, bufaddr, xfer);
+            } else if (saif) {
+                for (unsigned i = 0; i < pio_num; i++) {
+                    mxs_saif_dma_pio(saif, i, pio[i]);
+                }
+                mxs_saif_dma_data(saif, to_device, bufaddr, xfer);
             } else if (!s->is_apbx && ch == 13 && s->lcdif) {
                 mxs_lcdif_dma_data(s->lcdif, to_device, bufaddr, xfer);
             } else {

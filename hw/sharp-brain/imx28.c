@@ -111,8 +111,8 @@ static const struct {
     { TYPE_MXS_STMP, "auart2",   0x8006e000, 114 },
     { TYPE_MXS_STMP, "auart3",   0x80070000, 115 },
     { TYPE_MXS_STMP, "auart4",   0x80072000, 116 },
-    { TYPE_MXS_STMP, "saif0",    0x80042000, 59 },
-    { TYPE_MXS_STMP, "saif1",    0x80046000, 58 },
+    { TYPE_MXS_SAIF, "saif0",    0x80042000, 59 },
+    { TYPE_MXS_SAIF, "saif1",    0x80046000, 58 },
     { TYPE_MXS_STMP, "spdif",    0x80054000, 45 },
     { TYPE_MXS_STMP, "audioout", 0x80048000, -1 },
     { TYPE_MXS_STMP, "audioin",  0x8004c000, -1 },
@@ -465,6 +465,8 @@ static void imx28_realize(DeviceState *dev, Error **errp)
 
         dma->i2c[0] = MXS_I2C(s->i2c[0]);
         dma->i2c[1] = MXS_I2C(s->i2c[1]);
+        dma->saif[0] = MXS_SAIF(s->stmp[5]);   /* saif0 */
+        dma->saif[1] = MXS_SAIF(s->stmp[6]);   /* saif1 */
     }
 }
 

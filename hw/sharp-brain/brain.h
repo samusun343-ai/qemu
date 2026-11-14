@@ -12,6 +12,9 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
+#include "qemu/audio.h"
+#include "qemu/fifo8.h"
+#include "qemu/timer.h"
 #include "hw/core/sysbus.h"
 #include "target/arm/cpu.h"
 #include "hw/sd/sd.h"
@@ -194,6 +197,7 @@ struct MxsDmaState {
     struct MxsGpmiState *gpmi;          /* APBH channels 4-11 */
     struct MxsLcdifPriv *lcdif;         /* APBH channel 13 */
     struct MxsI2cState *i2c[2];         /* APBX channels 6-7 */
+    struct MxsSaifState *saif[2];       /* APBX channels 4-5 */
 };
 
 /* ------------------------------------------------------------------ */
@@ -320,6 +324,7 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_USBPHY "mxs-usbphy"
 #define TYPE_MXS_PWM "mxs-pwm"
 #define TYPE_MXS_STMP "mxs-stmp"
+#define TYPE_MXS_SAIF "mxs-saif"
 #define TYPE_MXS_PXP "mxs-pxp"
 #define TYPE_MXS_USB_OTG "mxs-usb-otg"
 #define TYPE_BU26154 "bu26154"
@@ -362,6 +367,33 @@ struct MxsI2cState {
 void mxs_i2c_dma_pio(MxsI2cState *s, int word_idx, uint32_t value);
 void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
                       dma_addr_t bufaddr, uint32_t len);
+
+/* ------------------------------------------------------------------ */
+/* SAIF (hw/sharp-brain/saif.c)                                       */
+
+OBJECT_DECLARE_SIMPLE_TYPE(MxsSaifState, MXS_SAIF)
+
+struct MxsSaifState {
+    SysBusDevice parent_obj;
+    MemoryRegion iomem;
+    qemu_irq irq;
+
+    uint32_t ctrl;
+    uint32_t stat;
+
+    /* TX byte stream (DMA/CPU writes) draining to the audio backend */
+    Fifo8 tx_fifo;
+    uint32_t dropped;        /* TX bytes dropped on FIFO overflow */
+
+    AudioBackend *audio_be;
+    SWVoiceOut *voice;
+    QEMUTimer *timer;
+};
+
+/* DMA client hooks (APBX channels 4 = SAIF0 TX, 5 = SAIF1 RX/TX) */
+void mxs_saif_dma_pio(MxsSaifState *s, int word_idx, uint32_t value);
+void mxs_saif_dma_data(MxsSaifState *s, bool to_device,
+                       dma_addr_t bufaddr, uint32_t len);
 
 /* ------------------------------------------------------------------ */
 /* LRADC (hw/sharp-brain/lradc.c): ADC + 4-wire resistive touch        */

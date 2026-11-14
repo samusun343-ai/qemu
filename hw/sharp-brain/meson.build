@@ -12,6 +12,7 @@ system_ss.add(when: 'CONFIG_SHARP_BRAIN', if_true: files(
   'lradc.c',
   'i2c.c',
   'bu26154.c',
+  'saif.c',
   'lcdif.c',
   'misc.c',
   'usb-otg.c',
