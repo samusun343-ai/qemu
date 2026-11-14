@@ -130,35 +130,43 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
     /* full scale ~ 1.85V in 12 bits (LRADC range), values fit 18 bits */
     if (s->touch_down) {
         /*
-         * Panel transfer functions, derived from the guest's own
-         * stored calibration (HKLM\HARDWARE\DEVICEMAP\TOUCH
-         * \CalibrationData in the eMMC image's registry hive):
+         * Panel transfer functions, measured end to end against the
+         * guest's own stored calibration (HKLM\HARDWARE\DEVICEMAP
+         * \TOUCH\CalibrationData in the eMMC image's registry hive):
          *   "1931,1961 889,2993 888,906 2961,920 2958,3039"
-         * i.e. raw (1931,1961) at screen centre (427,240), and raw
-         * (889,2993) / (888,906) / (2961,920) / (2958,3039) at the
-         * four calibration points (171,96) / (171,384) /
-         * (683,384) / (683,96) -- the guest's calibration UI uses
-         * 20%-inset points, as verified from where its mapped
-         * points land (a 10%-inset reading of the same string
-         * compresses the right half of the panel into the middle
-         * tiles).  Solving raw = affine(screen) for those five
-         * points (residual <= 11 counts at every point):
-         *   Xval =  198 + 4.041*x
-         *   Yval = 3673 + 0.090*x - 7.247*y      (Y is inverted)
-         * s->x/s->y are in pixel units (x_max=853, y_max=479).
+         * The guest maps raw counts back to screen pixels with the
+         * affine transform those five points define, so the model
+         * must produce the raw counts that this guest maps onto the
+         * intended pixel.  An earlier derivation assumed the five
+         * calibration targets sit at 20%-inset positions of the
+         * 854-wide view space; a full-panel probe (pen dots on the
+         * handwriting canvas, 13 points, 2026-11-15) showed the
+         * composed map guest(model(p)) was instead an affine
+         * compression (sx = 0.910x + 6.7, sy = -0.011x + 0.927y +
+         * 36.7, fit residual <= 0.5 px): tile centres still landed
+         * but points within ~15 px of a tile edge crossed into the
+         * neighbouring tile.  Composing the old functions with the
+         * inverse of the measured error gives:
+         *   Xval =  168 + 4.440*x - 0.005*y
+         *   Yval = 3960 + 0.003*x - 7.818*y      (Y is inverted)
+         * Cross-check: under these functions the five stored raw
+         * points land on a symmetric target cross -- centre
+         * (397,256), corners (162,124) / (162,391) / (629,389) /
+         * (628,118) -- which is what a calibration UI produces;
+         * the old assumed positions do not.  s->x/s->y are in pixel
+         * units (x_max=853, y_max=479).
          *
-         * The functions previously used here were fitted to the
-         * reference implementation's conversion traces instead and
-         * do not match this guest's stored calibration, and its
-         * pressure phase (below) returned the coordinate values,
-         * which made the guest discard every right-half point
-         * (taps with host x >= ~460 never acted, anywhere).  The
-         * stored calibration is the ground truth for this guest:
-         * it is what the real panel was calibrated against.
+         * The stored calibration is the ground truth for this
+         * guest: it is what the real panel was calibrated against.
+         * The pressure phase (below) must not return the coordinate
+         * values; see its comment.
          */
-        uint32_t xv = 198 + (uint32_t)((uint64_t)s->x * 4041 / 1000);
-        uint32_t yv = 3673 + (uint32_t)((uint64_t)s->x * 90 / 1000)
-                           - (uint32_t)((uint64_t)s->y * 7247 / 1000);
+        int32_t xvi = 168 + ((int32_t)s->x * 4440 - (int32_t)s->y * 5)
+                            / 1000;
+        int32_t yvi = 3960 + ((int32_t)s->x * 3 - (int32_t)s->y * 7818)
+                             / 1000;
+        uint32_t xv = xvi < 0 ? 0 : (uint32_t)xvi;
+        uint32_t yv = yvi < 0 ? 0 : (uint32_t)yvi;
         if (x_mode && (ch == CH_YP || ch == CH_XP)) {
             return xv;
         }
