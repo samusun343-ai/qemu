@@ -389,6 +389,10 @@ struct MxsLradcState {
     bool touch_down;
     int x, y;                    /* 0..max */
     uint32_t x_max, y_max;
+
+    /* sidebar touchkey strip (events posted to the EDNA2 mailbox) */
+    DeviceState *edna2_mb;       /* link to the EDNA2 mailbox */
+    int strip_idx;               /* strip key held, -1 = none */
 };
 
 /* public: inject external GPIO input levels (keyboard, card detect) */
@@ -430,6 +434,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(BrainEdna2MbState, BRAIN_EDNA2_MB)
 /* EDNA2 sub-MCU mailbox window (carved out of the DRAM aperture) */
 #define BRAIN_EDNA2_MB_BASE    0x400ea000
 #define BRAIN_EDNA2_MB_SIZE    0x1000
+
+/* post a touchkey event code into the mailbox event slot (+0x404),
+ * as the sub-MCU would (see edna2-mb.c) */
+void brain_edna2_mb_post_touchkey(BrainEdna2MbState *s, uint32_t code);
 
 /*
  * Host key -> matrix contact mapping.  Tables are indexed by linux

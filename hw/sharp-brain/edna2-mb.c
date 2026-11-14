@@ -68,6 +68,17 @@ struct BrainEdna2MbState {
     uint8_t cmd;
 };
 
+void brain_edna2_mb_post_touchkey(BrainEdna2MbState *s, uint32_t code)
+{
+    /*
+     * Sidebar touchkey events are delivered by the sub-MCU as event
+     * codes in the +0x404 slot, which the guest's TouchSub thread
+     * polls.  (The same slot doubles as the command completion flag;
+     * the reference model posts touchkey codes there too.)
+     */
+    memcpy(&s->regs[REG_DONE], &code, sizeof(code));
+}
+
 static void edna2_mb_cmd_start(BrainEdna2MbState *s)
 {
     s->busy = true;
