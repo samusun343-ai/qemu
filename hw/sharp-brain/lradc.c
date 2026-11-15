@@ -417,7 +417,7 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
         return s->ctrl4;
     case HW_LRADC_STATUS:
     {
-        qemu_log_mask(LOG_TRACE, "mxs-lradc: read STATUS -> 0x%08x\n",
+        BRAIN_LOG("mxs-lradc: read STATUS -> 0x%08x\n",
                       s->status);
         uint32_t v = s->status & ~BM_STATUS_TOUCH_RAW;
         if (s->touch_down) {
@@ -432,7 +432,7 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
     default:
         for (int n = 0; n < MXS_LRADC_NUM_CH; n++) {
             if ((offset & ~0xcull) == HW_LRADC_CH(n)) {
-                qemu_log_mask(LOG_TRACE,
+                BRAIN_LOG(
                               "mxs-lradc: read CH%d -> 0x%08x\n", n, s->ch[n]);
                 return s->ch[n];
             }
@@ -460,7 +460,7 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
 {
     MxsLradcState *s = opaque;
 
-    qemu_log_mask(LOG_TRACE, "mxs-lradc: write 0x%03x = 0x%08x\n",
+    BRAIN_LOG("mxs-lradc: write 0x%03x = 0x%08x\n",
                   (uint32_t)offset, (uint32_t)val);
     switch (offset & ~0xcull) {
     case HW_LRADC_CTRL0:

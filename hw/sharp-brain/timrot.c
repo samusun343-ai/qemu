@@ -340,7 +340,7 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
     uint32_t reg = addr & ~0xf;
     uint32_t off = addr & 0xf;
 
-    qemu_log_mask(LOG_TRACE, "timrot: write 0x%03x off %u = 0x%08x\n",
+    BRAIN_LOG("timrot: write 0x%03x off %u = 0x%08x\n",
                   (unsigned)reg, off, (uint32_t)value);
 
     if (reg == TIMROT_ROTCTRL) {

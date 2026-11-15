@@ -145,7 +145,7 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
         s->last_cmd = val16 & 0xff;
         s->cmd_pos = 0;
         s->write_active = false;
-        qemu_log_mask(LOG_TRACE,
+        BRAIN_LOG(
                       "brain-panel: CMD 0x%02x (mac=0x%02x win x[%u..%u] "
                       "y[%u..%u] pos %u,%u)\n", s->last_cmd, s->mac,
                       s->col_start, s->col_end, s->page_start, s->page_end,
@@ -174,11 +174,11 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
     switch (s->last_cmd) {
     case ILI9805_MAC:
         s->mac = val16 & 0xff;
-        qemu_log_mask(LOG_TRACE, "brain-panel: MAC = 0x%02x\n", s->mac);
+        BRAIN_LOG("brain-panel: MAC = 0x%02x\n", s->mac);
         break;
     case ILI9805_PIXFMT:
         s->pixel_fmt = val16 & 0xff;
-        qemu_log_mask(LOG_TRACE, "brain-panel: PIXFMT = 0x%02x\n",
+        BRAIN_LOG("brain-panel: PIXFMT = 0x%02x\n",
                       s->pixel_fmt);
         break;
     case ILI9805_CASET:
@@ -189,7 +189,7 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             s->col_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->col_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
             s->gram_x = s->col_start;
-            qemu_log_mask(LOG_TRACE, "brain-panel: CASET %u..%u\n",
+            BRAIN_LOG("brain-panel: CASET %u..%u\n",
                           s->col_start, s->col_end);
         }
         break;
@@ -201,7 +201,7 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             s->page_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->page_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
             s->gram_y = s->page_start;
-            qemu_log_mask(LOG_TRACE, "brain-panel: PASET %u..%u\n",
+            BRAIN_LOG("brain-panel: PASET %u..%u\n",
                           s->page_start, s->page_end);
         }
         break;
@@ -334,7 +334,7 @@ static void lcdif_repush_if_dirty(MxsLcdifPriv *s)
     if (s->dirty) {
         panel_invalidate(s);
     }
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "lcdif: VSYNC re-push full frame buf=0x%" HWADDR_PRIx
                   " (framebuffer changed)\n",
                   s->full_frame_buf);
@@ -372,7 +372,7 @@ static void lcdif_run_master(MxsLcdifPriv *s)
     uint32_t done = 0;
     uint8_t *mem;
 
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "brain-lcdif: master run: count=%ux%u total=%u "
                   "cur_buf=0x%08x next_buf=0x%08x data=%d ctrl=0x%08x\n",
                   (s->transfer_count >> 16) & 0xffff,
@@ -669,7 +669,7 @@ int mxs_lcdif_dma_data(MxsLcdifPriv *s, bool to_device,
     bool is_data = s->ctrl & BM_CTRL_DATA_SELECT;
     uint8_t *mem;
 
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "brain-lcdif: dma %s len=%u at 0x%08x data=%d ctrl=0x%08x "
                   "xfer=0x%08x\n", to_device ? "push" : "pull", len,
                   (uint32_t)bufaddr, is_data, s->ctrl, s->transfer_count);

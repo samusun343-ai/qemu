@@ -361,7 +361,7 @@ static bool bootrom_parse_sb(void)
     stream_size = 16 + data_len;
     stream = g_malloc(stream_size);
 
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "bootrom: SB image %u blocks, header %u blocks, "
                   "%u sections, boot section %u (off=%u len=%u), "
                   "boot tag at +%u%s\n",
@@ -458,7 +458,7 @@ static bool bootrom_do_call(uint32_t ivt_addr)
     cpu->env.thumb = entry & 1;
     cpu_set_pc(cs, entry & ~1u);
 
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "bootrom: CALL -> entry 0x%08x (%s mode), lr=0x%08x\n",
                   entry, entry & 1 ? "thumb" : "arm", BOOTROM_TRAMPOLINE);
     return true;
@@ -612,7 +612,7 @@ static void bootrom_patch_eboot(uint8_t *img, uint32_t count)
             break;
         }
 
-        qemu_log_mask(LOG_TRACE,
+        BRAIN_LOG(
                       "bootrom: EBOOT resume fixup applied at +%#x "
                       "(blob %#x -> VA %#x)\n",
                       off, blob_pa, blob_pa + 0x60000000);
@@ -645,7 +645,7 @@ static bool bootrom_run(void)
         case SB_CMD_NOP:
         case SB_CMD_TAG:
         case SB_CMD_MODE:
-            qemu_log_mask(LOG_TRACE, "bootrom: +%06u NOP/TAG/MODE "
+            BRAIN_LOG("bootrom: +%06u NOP/TAG/MODE "
                           "(tag 0x%02x flags 0x%04x)\n", pos, cmd, flags);
             break;
         case SB_CMD_LOAD:
@@ -657,7 +657,7 @@ static bool bootrom_run(void)
                               "(%u bytes)\n", addr, count);
                 return false;
             }
-            qemu_log_mask(LOG_TRACE, "bootrom: +%06u LOAD 0x%08x, %u bytes\n",
+            BRAIN_LOG("bootrom: +%06u LOAD 0x%08x, %u bytes\n",
                           pos, addr, count);
             if (addr >= IMX28_DRAM_BASE && count >= 0x2000) {
                 bootrom_patch_eboot(&c[16], count);
@@ -670,7 +670,7 @@ static bool bootrom_run(void)
         {
             uint32_t data_le = cpu_to_le32(data);
 
-            qemu_log_mask(LOG_TRACE, "bootrom: +%06u FILL 0x%08x, %u bytes "
+            BRAIN_LOG("bootrom: +%06u FILL 0x%08x, %u bytes "
                           "with 0x%08x\n", pos, addr, count, data);
             uint32_t words = (count + 3) / 4;
             for (uint32_t i = 0; i < words; i++) {
@@ -683,7 +683,7 @@ static bool bootrom_run(void)
         case SB_CMD_JUMP:
         case SB_CMD_CALL:
             bootrom.cmd_pos = next;    /* resume after the call */
-            qemu_log_mask(LOG_TRACE, "bootrom: +%06u %s 0x%08x%s\n", pos,
+            BRAIN_LOG("bootrom: +%06u %s 0x%08x%s\n", pos,
                           cmd == SB_CMD_CALL ? "CALL" : "JUMP", addr,
                           (flags & SB_FLAG_HAB) ? " (HAB)" : "");
             if (!bootrom_do_call(addr)) {
@@ -740,7 +740,7 @@ static void brain_bootrom_reset(void *opaque)
     if (bootrom.mailbox_pending) {
         /* a stage returned to the ROM: resume the command stream */
         bootrom.mailbox_pending = false;
-        qemu_log_mask(LOG_TRACE, "bootrom: stage returned, resuming\n");
+        BRAIN_LOG("bootrom: stage returned, resuming\n");
         if (!bootrom_run()) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "bootrom: boot stream complete after stage "

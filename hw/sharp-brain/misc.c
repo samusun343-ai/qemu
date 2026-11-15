@@ -456,7 +456,7 @@ static void pxp_process(hwaddr next)
                         }
                     }
                 }
-                qemu_log("pxp: blit src=0x%08x dst=0x%08x "
+                BRAIN_LOG("pxp: blit src=0x%08x dst=0x%08x "
                          "(scaled composite %dx%d -> %dx%d @(%d,%d), "
                          "ctrl=0x%08x scale=0x%08x)\n",
                          src_pa, dst_pa, in_w, in_h, out_w, out_h,
@@ -477,7 +477,7 @@ static void pxp_process(hwaddr next)
         for (y = 0; y < 800; y++) {
             memcpy(dst + y * 960, src + y * 1600, 960);
         }
-        qemu_log("pxp: blit src=0x%08x dst=0x%08x "
+        BRAIN_LOG("pxp: blit src=0x%08x dst=0x%08x "
                  "(combine -> fb repack, ctrl=0x%08x scale=0x%08x)\n",
                  src_pa, dst_pa, ctrl, scale);
         return;
@@ -501,7 +501,7 @@ static void pxp_process(hwaddr next)
             drow[x] = srow[y];
         }
     }
-    qemu_log("pxp: blit src=0x%08x dst=0x%08x "
+    BRAIN_LOG("pxp: blit src=0x%08x dst=0x%08x "
              "(800x480 -> 480x800 CW, stride 1600)\n",
              src_pa, dst_pa);
 }

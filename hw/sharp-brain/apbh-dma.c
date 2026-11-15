@@ -433,7 +433,7 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
         addr < DMA_REG_NXTCMDAR(MXS_DMA_CHANNELS)) {
         int ch = (addr - DMA_REG_NXTCMDAR(0)) / 0x70;
         off = (addr - DMA_REG_NXTCMDAR(0)) % 0x70;
-        qemu_log_mask(LOG_TRACE,
+        BRAIN_LOG(
                       "mxs-dma: ch%d write off 0x%02x = 0x%08x\n",
                       ch, off, (uint32_t)value);
         switch (off) {

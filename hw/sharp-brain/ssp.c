@@ -164,7 +164,7 @@ static void mxs_ssp_execute(MxsSspState *s)
     req.arg = s->cmd1;
     req.crc = 0;
 
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "mxs-ssp%d: [@%u] CMD%d arg 0x%08x (ctrl0 0x%08x)\n",
                   s->id,
                   (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000),
@@ -320,7 +320,7 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
     uint8_t *buf = g_malloc(len);
     MemTxResult res;
 
-    qemu_log_mask(LOG_TRACE,
+    BRAIN_LOG(
                   "mxs-ssp%d: dma %s %u bytes at 0x%" HWADDR_PRIx
                   " (data_remaining=%u xfer_size=%u)\n", s->id,
                   to_device ? "write" : "read", len, bufaddr,
@@ -371,7 +371,7 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
         }
         res = address_space_write(&address_space_memory, bufaddr,
                                   MEMTXATTRS_UNSPECIFIED, buf, n);
-        qemu_log_mask(LOG_TRACE,
+        BRAIN_LOG(
                       "mxs-ssp%d: [@%u] dma read done n=%u from_fifo=%u "
                       "first=%02x%02x%02x%02x fifo_level=%u\n", s->id,
                       (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000),
@@ -529,7 +529,7 @@ static void mxs_ssp_write(void *opaque, hwaddr addr, uint64_t value,
         s->timing = value;
         return;
     case SSP_CTRL1:
-        qemu_log_mask(LOG_TRACE, "mxs-ssp%d: CTRL1 %s 0x%08x\n", s->id,
+        BRAIN_LOG("mxs-ssp%d: CTRL1 %s 0x%08x\n", s->id,
                       off == 0 ? "REG" : off == 4 ? "SET" :
                       off == 8 ? "CLR" : "TOG", (uint32_t)value);
         ssp_alias_write(&s->ctrl1, off, value);
