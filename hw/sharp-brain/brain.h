@@ -11,6 +11,7 @@
 #define HW_SHARP_BRAIN_BRAIN_H
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/units.h"
 #include "qemu/audio.h"
 #include "qemu/fifo8.h"
@@ -21,6 +22,36 @@
 #include "system/dma.h"
 #include "qom/object.h"
 #include "standard-headers/linux/input-event-codes.h"
+
+/* ------------------------------------------------------------------ */
+/* device trace gate                                                  */
+
+/*
+ * The device models carry verbose per-access trace lines for bring-up
+ * debugging.  They cannot go through qemu_log_mask(LOG_TRACE, ...)
+ * directly: builds configured with the "log" trace backend
+ * (CONFIG_TRACE_LOG) turn the LOG_TRACE bit on unconditionally, which
+ * floods stderr with tens of megabytes per boot.  Gate them behind
+ * the BRAIN_TRACE environment variable instead (read once): set
+ * BRAIN_TRACE=1 to get the traditional trace output on stderr.
+ * Genuine diagnostics (LOG_GUEST_ERROR / LOG_UNIMP) are not gated.
+ */
+static inline bool brain_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = getenv("BRAIN_TRACE") != NULL;
+    }
+    return enabled;
+}
+
+#define BRAIN_LOG(fmt, ...) \
+    do { \
+        if (brain_trace_enabled()) { \
+            qemu_log(fmt, ##__VA_ARGS__); \
+        } \
+    } while (0)
 
 /* ------------------------------------------------------------------ */
 /* i.MX28 memory map                                                  */

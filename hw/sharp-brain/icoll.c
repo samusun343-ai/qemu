@@ -88,7 +88,7 @@ static void icoll_set_irq(void *opaque, int n, int level)
         return;
     }
     if (!!level != s->asserted[n]) {
-        qemu_log_mask(LOG_TRACE, "icoll: irq %d -> %d\n", n, !!level);
+        BRAIN_LOG("icoll: irq %d -> %d\n", n, !!level);
     }
     s->asserted[n] = !!level;
     icoll_update(s);
@@ -121,7 +121,7 @@ static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
                 s->vector_latch = n;
             }
             uint32_t v = s->vector_base + 4 * (uint32_t)n;
-            qemu_log_mask(LOG_TRACE, "icoll: VECTOR -> 0x%x (n=%d)\n", v, n);
+            BRAIN_LOG("icoll: VECTOR -> 0x%x (n=%d)\n", v, n);
             return v;
         }
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -137,10 +137,10 @@ static uint64_t icoll_read(void *opaque, hwaddr addr, unsigned size)
         int n = icoll_current_irq(s);
 
         if (n >= 0) {
-            qemu_log_mask(LOG_TRACE, "icoll: STAT -> %d\n", n);
+            BRAIN_LOG("icoll: STAT -> %d\n", n);
             return n;
         }
-        qemu_log_mask(LOG_TRACE, "icoll: STAT -> none\n");
+        BRAIN_LOG("icoll: STAT -> none\n");
         return 0x7f;    /* no interrupt */
     }
     default:
@@ -171,17 +171,17 @@ static void icoll_write(void *opaque, hwaddr addr, uint64_t value,
     if (reg >= 0x120) {
         int n = (reg - 0x120) / 0x10;
         if (((reg - 0x120) % 0x10) == 0) {
-            qemu_log_mask(LOG_TRACE, "icoll: INTR[%d] %s 0x%08x\n", n,
+            BRAIN_LOG("icoll: INTR[%d] %s 0x%08x\n", n,
                           off == 0 ? "REG" : off == 4 ? "SET" :
                           off == 8 ? "CLR" : "TOG", (uint32_t)value);
         }
     } else if (reg >= 0x20 && reg < 0x120) {
-        qemu_log_mask(LOG_TRACE, "icoll: alias 0x%03x %s 0x%08x\n",
+        BRAIN_LOG("icoll: alias 0x%03x %s 0x%08x\n",
                       (unsigned)reg,
                       off == 0 ? "REG" : off == 4 ? "SET" :
                       off == 8 ? "CLR" : "TOG", (uint32_t)value);
     } else if (reg == 0) {
-        qemu_log_mask(LOG_TRACE, "icoll: VECTOR w 0x%08x\n", (uint32_t)value);
+        BRAIN_LOG("icoll: VECTOR w 0x%08x\n", (uint32_t)value);
     }
 
     switch (reg) {
@@ -205,7 +205,7 @@ static void icoll_write(void *opaque, hwaddr addr, uint64_t value,
         break;
     case ICOLL_LEVELACK:
         s->level = value;
-        qemu_log_mask(LOG_TRACE, "icoll: LEVELACK 0x%x\n", (uint32_t)value);
+        BRAIN_LOG("icoll: LEVELACK 0x%x\n", (uint32_t)value);
         icoll_update(s);
         return;
     case ICOLL_CTRL:
