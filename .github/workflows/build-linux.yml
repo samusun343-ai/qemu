@@ -8,6 +8,16 @@
 #   share/qemu/           data files (keymaps, firmware blobs)
 #
 # so the executable finds its data files relative to its own location.
+#
+# Static-link notes (glib): Ubuntu ships no static libmount, yet the
+# system gio-2.0 lists -lmount among its private static dependencies
+# because of its GUnixMounts code.  QEMU never uses that functionality,
+# so the build links a tiny compatibility shim (libmount-shim.c, next
+# to this file) whose functions all report "no mount information".
+# Optional libraries without static archives (libudev, ALSA) are
+# disabled instead: --disable-libudev and --disable-alsa, with
+# --audio-drv-list=oss (the wav audio backend used for captures is
+# always built).
 
 name: Build Linux (sharp-brain)
 
@@ -45,6 +55,14 @@ jobs:
             'meson==1.12.1' 'ninja==1.13.2'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Build the libmount static-link shim
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/stublib"
+          cc -O2 -c .github/workflows/libmount-shim.c \
+            -o /tmp/libmount-shim.o
+          ar rcs "$GITHUB_WORKSPACE/stublib/libmount.a" /tmp/libmount-shim.o
+          echo "LIBRARY_PATH=$GITHUB_WORKSPACE/stublib" >> "$GITHUB_ENV"
+
       - name: Configure (static, arm-softmmu only)
         run: |
           mkdir build
@@ -77,6 +95,8 @@ jobs:
             --disable-libnfs \
             --disable-libusb \
             --disable-usb-redir \
+            --disable-libudev \
+            --disable-alsa \
             --disable-brlapi \
             --disable-virtfs \
             --disable-seccomp \
@@ -84,12 +104,26 @@ jobs:
             --disable-linux-io-uring \
             --disable-zstd \
             --disable-lzo \
-            --disable-snappy
+            --disable-snappy \
+            --audio-drv-list=oss
 
       - name: Build
         run: |
           cd build
-          ninja qemu-system-arm
+          set -o pipefail
+          ninja qemu-system-arm 2>&1 | tee "$GITHUB_WORKSPACE/ninja-build.log"
+
+      - name: Surface build errors as annotations
+        if: failure()
+        run: |
+          LOG="$GITHUB_WORKSPACE/ninja-build.log"
+          if [ -f "$LOG" ]; then
+            grep -E 'error:|FAILED|undefined reference' "$LOG" | head -20 |
+            while IFS= read -r line; do
+              echo "::error::$(printf '%s' "$line" | tr -d '%' | cut -c1-240)"
+            done
+          fi
+          true
 
       - name: Package artifact
         run: |
@@ -141,4 +175,5 @@ jobs:
           path: |
             build/meson-logs
             build/config-host.mak
+            ninja-build.log
           if-no-files-found: ignore
