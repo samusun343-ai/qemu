@@ -395,6 +395,16 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
             if (!(s->timctrl[n] & TIMCTRL_MATCH_MODE)) {
                 s->base_count[n] = value;
                 s->base_ns[n] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+                /*
+                 * A fresh fixed count restarts the timer: in
+                 * one-shot use (Linux clockevents) set_next_event
+                 * only writes FIXED_COUNT, with no TIMCTRL write,
+                 * so a timer that stopped at zero on its previous
+                 * expiry must start counting again here.  Without
+                 * this the guest gets exactly one tick and every
+                 * jiffies-based timeout then spins forever.
+                 */
+                s->counting[n] = timrot_freq(s->timctrl[n]) != 0;
             }
             timrot_arm(s, n);
             return;
