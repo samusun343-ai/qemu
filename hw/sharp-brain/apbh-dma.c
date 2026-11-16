@@ -249,11 +249,23 @@ static void mxs_dma_run_budget(MxsDmaState *s, int ch, int budget)
                  * builds every SSP data transfer this way - skipping
                  * the PIO phase leaves the SSP without a pending data
                  * command and the transfer fails with zeroed data.
+                 *
+                 * A data descriptor WITHOUT PIO words carries no
+                 * command start: the command was already issued (by
+                 * the CPU writing CTRL0.RUN, as U-Boot's mxsmmc does,
+                 * or by a preceding PIO descriptor in the chain, as
+                 * Linux does) and the DMA only drains/fills the FIFO.
+                 * Kicking anyway re-issues the command mid-transfer;
+                 * the card's data stream restarts, so the buffer ends
+                 * up as the FIFO head spliced onto a restarted stream
+                 * and block reads return corrupt data.
                  */
                 for (unsigned i = 0; i < pio_num; i++) {
                     mxs_ssp_dma_pio(ssp, i, pio[i]);
                 }
-                mxs_ssp_dma_pio(ssp, -1, 0);
+                if (pio_num) {
+                    mxs_ssp_dma_pio(ssp, -1, 0);
+                }
                 mxs_ssp_dma_data(ssp, to_device, bufaddr, xfer);
             } else if (gpmi) {
                 for (unsigned i = 0; i < pio_num; i++) {
