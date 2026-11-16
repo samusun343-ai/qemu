@@ -1,0 +1,144 @@
+# Build qemu-system-arm (with the SHARP Brain machines) for Linux x86_64.
+#
+# The binary is linked statically so the uploaded artifact runs on any
+# Linux distribution without installing runtime libraries.  The artifact
+# uses the standard relocatable layout:
+#
+#   bin/qemu-system-arm   static executable
+#   share/qemu/           data files (keymaps, firmware blobs)
+#
+# so the executable finds its data files relative to its own location.
+
+name: Build Linux (sharp-brain)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [brain]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: qemu-system-arm static (ubuntu-24.04, x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 python3-pip \
+            libglib2.0-dev libpixman-1-dev libfdt-dev \
+            nettle-dev libgmp-dev zlib1g-dev \
+            libpcre2-dev libffi-dev libmount-dev libblkid-dev \
+            libselinux1-dev
+
+      - name: Install meson and ninja
+        # Versions match the toolchain used for local development builds
+        # (Ubuntu 24.04's meson is too old for QEMU, which needs >= 1.5.0).
+        run: |
+          python3 -m pip install --user --break-system-packages \
+            'meson==1.12.1' 'ninja==1.13.2'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (static, arm-softmmu only)
+        run: |
+          mkdir build
+          cd build
+          ../configure \
+            --target-list=arm-softmmu \
+            --static \
+            --disable-werror \
+            --disable-docs \
+            --disable-tools \
+            --disable-guest-agent \
+            --enable-fdt=system \
+            --enable-nettle \
+            --disable-gcrypt \
+            --disable-gnutls \
+            --disable-slirp \
+            --disable-capstone \
+            --disable-sdl \
+            --disable-gtk \
+            --disable-curses \
+            --disable-vte \
+            --disable-spice \
+            --disable-opengl \
+            --disable-virglrenderer \
+            --disable-xen \
+            --disable-tpm \
+            --disable-smartcard \
+            --disable-curl \
+            --disable-libssh \
+            --disable-libnfs \
+            --disable-libusb \
+            --disable-usb-redir \
+            --disable-brlapi \
+            --disable-virtfs \
+            --disable-seccomp \
+            --disable-linux-aio \
+            --disable-linux-io-uring \
+            --disable-zstd \
+            --disable-lzo \
+            --disable-snappy
+
+      - name: Build
+        run: |
+          cd build
+          ninja qemu-system-arm
+
+      - name: Package artifact
+        run: |
+          cd build
+          DESTDIR="$PWD/pkg" ninja install
+          ART="$GITHUB_WORKSPACE/artifact/qemu-system-arm-brain-linux-x86_64"
+          mkdir -p "$ART/bin" "$ART/share"
+          cp pkg/usr/local/bin/qemu-system-arm "$ART/bin/"
+          cp -r pkg/usr/local/share/qemu "$ART/share/"
+          strip "$ART/bin/qemu-system-arm"
+          cat > "$ART/README.txt" <<'EOF'
+          SHARP Brain QEMU - qemu-system-arm (static Linux x86_64 build)
+
+          Machines: pw-sh6 (alias: sharp-brain), pw-aj2, pw-aj1
+
+          The executable is statically linked and needs no runtime
+          libraries.  Run it in place; it locates the bundled data
+          files in ../share/qemu relative to the executable.
+
+          Example (PW-SH6/PW-AJ2 eMMC image, read-only boot):
+            ./bin/qemu-system-arm -M pw-sh6 \
+              -drive if=sd,index=0,file=emmc.img,format=raw,snapshot=on
+
+          A microSD card image can be attached as a second drive:
+              -drive if=sd,index=1,file=sd.img,format=raw
+          EOF
+          ls -laR "$ART" | head -50
+
+      - name: Sanity-check the packaged binary
+        run: |
+          ART="$GITHUB_WORKSPACE/artifact/qemu-system-arm-brain-linux-x86_64"
+          file "$ART/bin/qemu-system-arm"
+          ldd "$ART/bin/qemu-system-arm" || true
+          env -i "$ART/bin/qemu-system-arm" --version
+          env -i "$ART/bin/qemu-system-arm" -M help | grep -E 'pw-sh6|pw-aj2|pw-aj1|sharp-brain'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-arm-brain-linux-x86_64
+          path: artifact/qemu-system-arm-brain-linux-x86_64
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/meson-logs
+            build/config-host.mak
+          if-no-files-found: ignore
