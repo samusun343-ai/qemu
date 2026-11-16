@@ -416,6 +416,9 @@ struct MxsSaifState {
     Fifo8 tx_fifo;
     uint32_t dropped;        /* TX bytes dropped on FIFO overflow */
 
+    /* virtual time at which the next RX sample becomes available */
+    int64_t rx_next_ns;
+
     AudioBackend *audio_be;
     SWVoiceOut *voice;
     QEMUTimer *timer;

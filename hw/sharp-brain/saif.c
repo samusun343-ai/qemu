@@ -23,17 +23,31 @@
  *   - Playback data moves only through the APBX DMA: descriptor
  *     chains of 2048-byte buffers, stereo s16 LE at 44.1 kHz (the
  *     rate the driver programs into the codec's SR register).
- *     The guest never polls STAT/DATA (zero such accesses in a
- *     full boot + playback trace), so no completion IRQ timing is
- *     observable; the DMA engine's own completion IRQ drives the
- *     driver's buffer recycling.
+ *     During playback the guest never polls STAT/DATA (zero such
+ *     accesses in a full boot + playback trace); the DMA engine's
+ *     own completion IRQ drives the driver's buffer recycling.
+ *   - Opening the RECORD path is different (found in p16 by
+ *     register sampling of the wedged guest): after the codec
+ *     init burst the driver spins with IRQs masked in a 4-insn
+ *     loop that reads SAIF DATA, tests HW_SAIF_STAT bit 6
+ *     (FIFO_UNDERRUN_IRQ), and clears it via STAT_CLR once set.
+ *     On hardware the (empty) receive FIFO underruns as soon as
+ *     it is read, so the loop exits at once; real-hardware SAIF
+ *     dumps likewise show STAT = 0x80000050 (playback) /
+ *     0x80010060 (SAIF1) with the underrun bit set.
  *
  * Model:
  *
  *   - STMP register layout (REG/SET/CLR/TOG aliases, SFTRST rising
- *     edge sets CLKGATE, as in misc.c): CTRL 0x00, STAT 0x10 (BUSY
- *     reads 1 while running), DATA 0x20 (CPU writes feed the TX
- *     FIFO), VERSION 0x30 = 0x01010000.
+ *     edge sets CLKGATE, as in misc.c): CTRL 0x00, STAT 0x10
+ *     (PRESENT always set; BUSY/DMA_PREQ/FIFO_SERVICE read 1
+ *     while running; the FIFO_*_IRQ bits are sticky latches in
+ *     s->stat, set on under/overrun events and cleared by the
+ *     guest via STAT_CLR), DATA 0x20 (CPU writes feed the TX
+ *     FIFO; receive samples become available at the sample rate
+ *     once the port or its clock master runs, and a CPU read that
+ *     finds no sample yet latches FIFO_UNDERRUN_IRQ),
+ *     VERSION 0x30 = 0x01010000.
  *   - TX bytes (DMA or CPU) queue in a FIFO and drain to the QEMU
  *     audio backend at 44.1 kHz stereo s16 via a pacing timer and
  *     the backend's avail callback.  The DMA chain is circular
@@ -42,8 +56,8 @@
  *     buffer-duration (mxs_dma_pace), which spreads the driver's
  *     completion IRQs and refills over time like hardware.
  *     Overflow is dropped, not back-pressured.
- *   - RX (record) DMA reads back silence; the guest's record path
- *     is not exercised by any bundled application found so far.
+ *   - RX (record) DMA reads back silence.  The bundled Voice Memo
+ *     app exercises the record path (see the STAT note above).
  */
 
 #include "qemu/osdep.h"
@@ -67,7 +81,13 @@
 #define SAIF_CTRL_CLKGATE (1u << 30)
 #define SAIF_CTRL_RUN     (1u << 0)
 
-#define SAIF_STAT_BUSY    (1u << 31)
+/* HW_SAIF_STAT bit definitions (Freescale regs-saif.h / i.MX28 RM) */
+#define SAIF_STAT_PRESENT       (1u << 31)
+#define SAIF_STAT_DMA_PREQ      (1u << 16)
+#define SAIF_STAT_FIFO_UNDERRUN (1u << 6)
+#define SAIF_STAT_FIFO_OVERRUN  (1u << 5)
+#define SAIF_STAT_FIFO_SERVICE  (1u << 4)
+#define SAIF_STAT_BUSY          (1u << 0)
 
 #define SAIF_VERSION_VALUE 0x01010000
 
@@ -77,6 +97,9 @@
 
 /* one DMA buffer (2048 bytes = 512 frames) per pacing tick */
 #define SAIF_PACE_NS (NANOSECONDS_PER_SECOND * 512 / SAIF_SAMPLE_RATE)
+
+/* one stereo frame period: RX samples arrive at the sample rate */
+#define SAIF_FRAME_NS (NANOSECONDS_PER_SECOND / SAIF_SAMPLE_RATE)
 
 static void saif_write_one(MxsSaifState *s, hwaddr addr, uint32_t value);
 
@@ -154,6 +177,7 @@ static void saif_push_tx(MxsSaifState *s, const uint8_t *data, uint32_t len)
 
     if (len > space) {
         s->dropped += len - space;
+        s->stat |= SAIF_STAT_FIFO_OVERRUN;
         len = space;
     }
     if (len) {
@@ -256,8 +280,41 @@ static uint64_t saif_read(void *opaque, hwaddr addr, unsigned size)
     switch (addr & ~0xf) {
     case SAIF_CTRL:
         return s->ctrl;
-    case SAIF_STAT:
-        return s->stat | (saif_running(s) ? SAIF_STAT_BUSY : 0);
+    case SAIF_STAT: {
+        uint32_t v = s->stat | SAIF_STAT_PRESENT;
+
+        if (saif_running(s)) {
+            v |= SAIF_STAT_BUSY | SAIF_STAT_DMA_PREQ | SAIF_STAT_FIFO_SERVICE;
+        }
+        return v;
+    }
+    case SAIF_DATA: {
+        /*
+         * CPU (PIO) read of the FIFO port.  Receive samples arrive
+         * at the sample rate once the port (or its clock-master
+         * sibling) is running: a read that finds a sample returns
+         * it (silence here); a read that finds the FIFO still
+         * empty latches FIFO_UNDERRUN_IRQ, as on hardware.  The
+         * WinCE wave driver's record-open path polls DATA/STAT in
+         * exactly this rhythm (waits for an underrun, clears it
+         * via STAT_CLR, then drains samples as they arrive), so
+         * modelling the arrival rate matters, not just the bit.
+         */
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        bool clocked = saif_running(s);
+
+        if (!clocked && s->dma) {
+            MxsSaifState *sib = s->dma->saif[s->dma_ch == 4 ? 1 : 0];
+
+            clocked = sib && saif_running(sib);
+        }
+        if (clocked && now >= s->rx_next_ns) {
+            s->rx_next_ns = now + SAIF_FRAME_NS;
+            return 0;
+        }
+        s->stat |= SAIF_STAT_FIFO_UNDERRUN;
+        return 0;
+    }
     case SAIF_VERSION:
         return SAIF_VERSION_VALUE;
     default:
@@ -288,6 +345,7 @@ static void saif_reset(DeviceState *dev)
     s->ctrl = SAIF_CTRL_SFTRST | SAIF_CTRL_CLKGATE;
     s->stat = 0;
     s->dropped = 0;
+    s->rx_next_ns = 0;
     fifo8_reset(&s->tx_fifo);
     if (s->voice) {
         audio_be_set_active_out(s->audio_be, s->voice, false);
