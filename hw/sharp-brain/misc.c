@@ -290,6 +290,29 @@ static uint16_t pxp_yuv422_to_rgb565(const uint8_t *row, int x,
     return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
 }
 
+/*
+ * The guest programs the PXP through linked register sets in
+ * memory (the documented PXP_NEXT layout, cf. Freescale's
+ * STMP378X PXP driver struct pxp_registers):
+ *   +0x000 CTRL        +0x004 OUTBUF (RGBBUF)
+ *   +0x008 OUTBUF2     +0x00c OUTSIZE (HW_PXP_RGBSIZE)
+ *   +0x010 S0BUF       +0x014 S0UBUF     +0x018 S0VBUF
+ *   +0x01c S0PARAM     +0x020 S0BACKGROUND
+ *   +0x024 S0CROP      +0x028 S0SCALE    +0x02c S0OFFSET
+ *   +0x030 S0COLORKEYLOW  +0x034 S0COLORKEYHIGH
+ *   +0x038 OLCOLORKEYLOW  +0x03c OLCOLORKEYHIGH
+ *   +0x040 OL0 {BUF, SIZE, PARAM, PARAM2}, OL1 at +0x050, ...
+ * OUTSIZE/RGBSIZE (i.MX23 RM, HW_PXP_RGBSIZE) packs
+ * ALPHA[31:24] | WIDTH[23:12] | HEIGHT[11:0] -- the output
+ * frame-buffer size, independent of rotation.  Across all
+ * captured sets it takes exactly two values (p15): the normal
+ * rotation sets carry 0xff320320 (ALPHA=0xff, 800x800: the
+ * 800-px-wide combine surface and the 800 rows the CW rotation
+ * writes into it) and the ATR composite sets 0xff3201e0
+ * (800x480, the landscape panel size).  The S0/OL colorkey
+ * words (+0x030/+0x038 low = 0x00ffffff, high = 0) match the
+ * Freescale driver's "colorkey disabled" programming.
+ */
 static void pxp_process(hwaddr next)
 {
     uint8_t set[0x100];
