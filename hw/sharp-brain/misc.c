@@ -137,21 +137,15 @@ static inline MxsMiscState *MISC_OF(void *obj)
 /* SFTRST / CLKGATE / busy bits that must read back as clear */
 #define CLKCTRL_BUSY_BITS            ((0xfu << 28))
 
-static uint64_t mxs_misc_read(void *opaque, hwaddr addr, unsigned size)
-{
-    MxsMiscState *s = opaque;
-    uint32_t idx = addr / 0x10;
-    uint32_t v;
+/* CLKCTRL register indexes (offset / 16) with no busy bits: the
+ * FRAC dividers carry their value in bits 29:0, so the generic
+ * busy-bit mask must not be applied to them. */
+#define CLKCTRL_FRAC0         0x1b
+#define CLKCTRL_FRAC1         0x1c
 
-    /*
-     * stmp register layout: all four 16-byte aliases (REG/SET/CLR/TOG)
-     * read back the same value.
-     */
-    if (idx >= ARRAY_SIZE(s->regs)) {
-        qemu_log_mask(LOG_GUEST_ERROR, "mxs-misc: bad read 0x%" HWADDR_PRIx
-                      "\n", addr);
-        return 0;
-    }
+static uint32_t mxs_misc_read_word(MxsMiscState *s, uint32_t idx)
+{
+    uint32_t v;
 
     switch (s->kind) {
     case KIND_DIGCTL:
@@ -170,6 +164,8 @@ static uint64_t mxs_misc_read(void *opaque, hwaddr addr, unsigned size)
         if (idx == 1 || idx == 3) {
             /* PLL0CTRL1 / PLL1CTRL1: locked */
             v |= CLKCTRL_PLL_LOCK;
+        } else if (idx == CLKCTRL_FRAC0 || idx == CLKCTRL_FRAC1) {
+            /* FRAC0/FRAC1: no busy bits; read back as written */
         } else {
             /* SFTRST/CLKGATE busy bits read as clear (running) */
             v &= ~CLKCTRL_BUSY_BITS;
@@ -197,6 +193,33 @@ static uint64_t mxs_misc_read(void *opaque, hwaddr addr, unsigned size)
     default:
         return s->regs[idx];
     }
+}
+
+static uint64_t mxs_misc_read(void *opaque, hwaddr addr, unsigned size)
+{
+    MxsMiscState *s = opaque;
+    uint32_t idx = addr / 0x10;
+    uint32_t v;
+
+    /*
+     * stmp register layout: all four 16-byte aliases (REG/SET/CLR/TOG)
+     * read back the same value.
+     */
+    if (idx >= ARRAY_SIZE(s->regs)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "mxs-misc: bad read 0x%" HWADDR_PRIx
+                      "\n", addr);
+        return 0;
+    }
+
+    v = mxs_misc_read_word(s, idx);
+
+    /* sub-word reads extract the addressed lane (the FRAC dividers
+     * are byte-programmed and byte-read by boot code) */
+    if (size < 4) {
+        v >>= (addr & 3) * 8;
+        v &= (1u << (size * 8)) - 1;
+    }
+    return v;
 }
 
 /*
@@ -621,19 +644,34 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
 
     uint32_t old = s->regs[idx];
 
-    switch (off) {
-    case 0:
-        s->regs[idx] = value;
-        break;
-    case 4:
-        s->regs[idx] |= value;
-        break;
-    case 8:
-        s->regs[idx] &= ~value;
-        break;
-    case 12:
-        s->regs[idx] ^= value;
-        break;
+    /*
+     * The alias (REG/SET/CLR/TOG) is selected by address bits [3:2];
+     * sub-word writes apply to the addressed byte/halfword lane only.
+     * Boot code programs the CLKCTRL FRAC dividers with byte writes
+     * to the plain and SET/CLR alias addresses (U-Boot's mxs clock
+     * code); dropping or word-widening those writes leaves the
+     * dividers at their old values and corrupts neighbouring fields.
+     */
+    {
+        unsigned shift = (addr & 3) * 8;
+        uint32_t mask = size == 4 ? 0xffffffffu :
+                        (((1u << (size * 8)) - 1) << shift);
+        uint32_t wval = ((uint32_t)value << shift) & mask;
+
+        switch ((addr >> 2) & 3) {
+        case 0:
+            s->regs[idx] = (s->regs[idx] & ~mask) | wval;
+            break;
+        case 1:
+            s->regs[idx] |= wval;
+            break;
+        case 2:
+            s->regs[idx] &= ~wval;
+            break;
+        case 3:
+            s->regs[idx] ^= wval;
+            break;
+        }
     }
 
     /*
@@ -681,7 +719,7 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
      * indication, not part of the write.
      */
     if (s->kind == KIND_PXP) {
-        if (idx == PXP_NEXT_SLOT && off == 0 && value != 0) {
+        if (idx == PXP_NEXT_SLOT && off == 0 && size == 4 && value != 0) {
             pxp_process((hwaddr)value);
             s->regs[PXP_STAT_SLOT] |= PXP_STAT_IRQ | PXP_STAT_NEXT_IRQ;
             qemu_set_irq(s->irq, true);
@@ -697,7 +735,7 @@ static const MemoryRegionOps mxs_misc_ops = {
     .read = mxs_misc_read,
     .write = mxs_misc_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
-    .impl.min_access_size = 4,
+    .impl.min_access_size = 1,
     .impl.max_access_size = 4,
 };
 
