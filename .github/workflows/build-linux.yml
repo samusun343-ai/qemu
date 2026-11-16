@@ -17,7 +17,10 @@
 # Optional libraries without static archives (libudev, ALSA) are
 # disabled instead: --disable-libudev and --disable-alsa, with
 # --audio-drv-list=oss (the wav audio backend used for captures is
-# always built).
+# always built).  xkbcommon is disabled as well: it also lacks a
+# static archive, and whether its development files are present
+# otherwise decides if the qemu-keymap utility is built, which
+# would make the build depend on the runner image's package set.
 
 name: Build Linux (sharp-brain)
 
@@ -97,6 +100,7 @@ jobs:
             --disable-usb-redir \
             --disable-libudev \
             --disable-alsa \
+            --disable-xkbcommon \
             --disable-brlapi \
             --disable-virtfs \
             --disable-seccomp \
