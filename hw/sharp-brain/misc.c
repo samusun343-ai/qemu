@@ -291,6 +291,35 @@ static uint16_t pxp_yuv422_to_rgb565(const uint8_t *row, int x,
 }
 
 /*
+ * Blend one RGB565 overlay pixel over the framebuffer pixel with
+ * alpha a (0..255), as the PXP does for an overlay whose OLnPARAM
+ * ALPHA_CNTL field selects Override or Multiply.  Channels are
+ * expanded to 8 bit by bit replication, blended with rounding and
+ * truncated back; a = 255 reproduces the overlay pixel exactly and
+ * a = 0 the background, so the opaque case is bit-identical to a
+ * plain copy.
+ */
+static uint16_t pxp_blend_rgb565(uint16_t fg, uint16_t bg, uint32_t a)
+{
+    uint32_t ia = 255 - a;
+    uint32_t fr = (fg >> 11) & 0x1f, fgv = (fg >> 5) & 0x3f, fb = fg & 0x1f;
+    uint32_t br = (bg >> 11) & 0x1f, bgv = (bg >> 5) & 0x3f, bb = bg & 0x1f;
+    uint32_t r, g, b;
+
+    fr = (fr << 3) | (fr >> 2);
+    fgv = (fgv << 2) | (fgv >> 4);
+    fb = (fb << 3) | (fb >> 2);
+    br = (br << 3) | (br >> 2);
+    bgv = (bgv << 2) | (bgv >> 4);
+    bb = (bb << 3) | (bb >> 2);
+
+    r = (fr * a + br * ia + 127) / 255;
+    g = (fgv * a + bgv * ia + 127) / 255;
+    b = (fb * a + bb * ia + 127) / 255;
+    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+/*
  * The guest programs the PXP through linked register sets in
  * memory (the documented PXP_NEXT layout, cf. Freescale's
  * STMP378X PXP driver struct pxp_registers):
@@ -369,7 +398,23 @@ static void pxp_process(hwaddr next)
          * alarm sounds (verified live in p15: a firing countdown
          * timer flips it to 0x41), so bit 0 of the PARAM word is
          * the composite gate.
-         * Overlays are copied verbatim (no alpha model).
+         *
+         * The PARAM word is HW_PXP_OLnPARAM (i.MX23 RM 17.4.x):
+         * ROP[19:16] | ALPHA[15:8] | FORMAT[7:4] |
+         * ENABLE_COLORKEY[3] | ALPHA_CNTL[2:1] | ENABLE[0].
+         * In every set the guest issues (census in p16: normal
+         * ATR, alarm firing, and a full app tour) both overlays
+         * carry FORMAT=4 (RGB565), ALPHA_CNTL=0 (Embedded) and
+         * PARAM2=0.  An RGB565 overlay has no per-pixel alpha,
+         * so Embedded means opaque and the pixels are copied
+         * verbatim.  The alpha model below covers the cases the
+         * guest does not currently exercise: ALPHA_CNTL=1
+         * (Override: blend with the ALPHA field) and =2
+         * (Multiply: per-pixel alpha scaled by ALPHA; for an
+         * opaque RGB565 pixel that reduces to the same factor).
+         * ALPHA_CNTL=3 (ROPs) and ENABLE_COLORKEY are not
+         * modelled (never observed; the set's OL colorkey words
+         * encode "disabled").
          *
          * Rects are in the device's landscape coordinates; the
          * framebuffer itself is the portrait panel image (480 px
@@ -451,16 +496,28 @@ static void pxp_process(hwaddr next)
                  * overlap for the tile to be visible at all.
                  */
                 for (g = 1; g >= 0; g--) {
-                    uint32_t obuf, orect, ogate;
+                    uint32_t obuf, orect, oparam;
                     const uint8_t *osrc;
                     int gx, gy, gw, gh, row;
+                    uint32_t oalpha, oactl;
+                    bool oblend;
 
                     memcpy(&obuf, set + 0x040 + g * 0x10, 4);
                     memcpy(&orect, set + 0x044 + g * 0x10, 4);
-                    memcpy(&ogate, set + 0x048 + g * 0x10, 4);
-                    if (!obuf || !(ogate & 1)) {
+                    memcpy(&oparam, set + 0x048 + g * 0x10, 4);
+                    if (!obuf || !(oparam & 1)) {
                         continue;
                     }
+                    /*
+                     * OLnPARAM alpha fields (see the header
+                     * comment): blend only for Override/Multiply
+                     * with a non-opaque ALPHA; Embedded (the only
+                     * mode the guest programs) is a verbatim copy
+                     * for RGB565 overlays.
+                     */
+                    oalpha = (oparam >> 8) & 0xff;
+                    oactl = (oparam >> 1) & 0x3;
+                    oblend = (oactl == 1 || oactl == 2) && oalpha < 0xff;
                     gx = ((orect >> 24) & 0xff) * 8;
                     gy = ((orect >> 16) & 0xff) * 8;
                     gw = ((orect >>  8) & 0xff) * 8;
@@ -490,7 +547,12 @@ static void pxp_process(hwaddr next)
                             }
                             dpx = (uint16_t *)(dst + lx * 960 +
                                                (479 - ly) * 2);
-                            *dpx = srow[col];
+                            if (oblend) {
+                                *dpx = pxp_blend_rgb565(srow[col], *dpx,
+                                                        oalpha);
+                            } else {
+                                *dpx = srow[col];
+                            }
                         }
                     }
                 }
