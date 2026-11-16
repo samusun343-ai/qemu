@@ -53,16 +53,10 @@ static void brain_init(MachineState *machine)
 
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_IMX28);
 
-    /*
-     * EDNA2 sub-MCU mailbox device.  It is created before the SoC is
-     * realized so the LRADC can link to it: the LRADC posts sidebar
-     * touchkey events into the mailbox (see lradc.c).
-     */
+    /* EDNA2 sub-MCU mailbox device (realized below, after the SoC). */
     s->edna2_mb = qdev_new(TYPE_BRAIN_EDNA2_MB);
     object_property_add_child(OBJECT(machine), "edna2-mb",
                               OBJECT(s->edna2_mb));
-    object_property_set_link(OBJECT(s->soc.lradc), "edna2-mb",
-                             OBJECT(s->edna2_mb), &error_fatal);
 
     qdev_realize(DEVICE(&s->soc), NULL, &error_fatal);
 

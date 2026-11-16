@@ -289,45 +289,28 @@ static void lradc_touch_event_check(MxsLradcState *s)
 /*
  * Sidebar touchkey strip.
  *
- * The Brain's right screen edge (x >= 800 of the 854-wide display)
- * is not panel area: it is a strip of touch keys （手書き, 50音,
- * abc, the D-pad, ツール, 決定, 戻る, ...) wired to the EDNA2
- * sub-MCU.  On the real machine (and in the reference QEMU, whose
- * "[lradc-strip]" / "[touchkey]" traces this table is taken from)
- * a press in the strip never reaches the LRADC: the sub-MCU posts
- * an event code into the mailbox slot at +0x404 and the guest's
- * TouchSub thread dispatches it.  The down codes are an active-low
- * key-matrix pattern (0xf7e with one bit cleared); the release
- * code is 0xf7e for every key.  Y band boundaries and all codes
- * were measured against the reference binary (2026-11-14).
+ * The Brain's right screen edge (x >= 800 of the 854-wide panel)
+ * carries a column of touch keys （手書き, 50音, abc, the D-pad,
+ * ツール, 決定, 戻る, ...).  The strip is ordinary resistive panel
+ * area as far as the LRADC is concerned: a press there is a normal
+ * touch point with x in [800, 854).  The guest's touch driver
+ * (sx8650_touchscreen.dll, touchkey.cpp) hit-tests incoming points
+ * against the rectangles registered under
+ * HARDWARE\DEVICEMAP\TOUCH\AREA (AREA\9 is the strip: an 80-px-wide
+ * region subdivided into bands along its length) and converts a
+ * strip hit into the corresponding key event.
+ *
+ * An earlier model intercepted strip presses and posted event
+ * codes into the EDNA2 mailbox slot at +0x404 instead of delivering
+ * the point, following the reference QEMU's convention.  That slot
+ * is the mailbox command completion flag: the guest reads it only
+ * while polling for command completion during boot, never in steady
+ * state (measured with a timestamped probe in the p20 audit), so
+ * the sidebar was completely dead.  Delivering the point through
+ * the LRADC like any other panel point makes every sidebar band
+ * work (p21: input-mode switch, 50-on keyboard, 決定/戻る, ...),
+ * with the mailbox posting disabled entirely.
  */
-#define LRADC_STRIP_X_MIN    800
-#define LRADC_STRIP_NKEYS    9
-#define LRADC_STRIP_CODE_UP  0x00000f7e
-
-static const int lradc_strip_yband[LRADC_STRIP_NKEYS - 1] = {
-    44, 116, 164, 212, 260, 308, 380, 428
-};
-static const uint32_t lradc_strip_code[LRADC_STRIP_NKEYS] = {
-    0xf7c, 0xf7a, 0xf76, 0xf5e, 0xf3e, 0xe7e, 0xd7e, 0xb7e, 0x77e
-};
-
-static int lradc_strip_index(int y)
-{
-    int idx = 0;
-
-    while (idx < LRADC_STRIP_NKEYS - 1 && y >= lradc_strip_yband[idx]) {
-        idx++;
-    }
-    return idx;
-}
-
-static void lradc_strip_post(MxsLradcState *s, uint32_t code)
-{
-    if (s->edna2_mb) {
-        brain_edna2_mb_post_touchkey(BRAIN_EDNA2_MB(s->edna2_mb), code);
-    }
-}
 
 static void lradc_input_event(DeviceState *dev, QemuConsole *src,
                               QemuInputEvent *evt)
@@ -337,22 +320,7 @@ static void lradc_input_event(DeviceState *dev, QemuConsole *src,
     switch (evt->type) {
     case INPUT_EVENT_KIND_BTN:
         if (evt->btn.button == INPUT_BUTTON_LEFT) {
-            if (evt->btn.down) {
-                if (s->x >= LRADC_STRIP_X_MIN) {
-                    /* strip press: goes to the sub-MCU, not the ADC */
-                    s->strip_idx = lradc_strip_index(s->y);
-                    lradc_strip_post(s, lradc_strip_code[s->strip_idx]);
-                } else {
-                    s->touch_down = true;
-                }
-            } else {
-                if (s->strip_idx >= 0) {
-                    lradc_strip_post(s, LRADC_STRIP_CODE_UP);
-                    s->strip_idx = -1;
-                } else {
-                    s->touch_down = false;
-                }
-            }
+            s->touch_down = evt->btn.down;
         }
         break;
     case INPUT_EVENT_KIND_ABS:
@@ -366,15 +334,6 @@ static void lradc_input_event(DeviceState *dev, QemuConsole *src,
                                          INPUT_EVENT_ABS_MIN,
                                          INPUT_EVENT_ABS_MAX,
                                          0, s->y_max);
-        }
-        if (s->strip_idx >= 0) {
-            /* slide along the strip: follow into the new band */
-            int idx = (s->x >= LRADC_STRIP_X_MIN) ?
-                      lradc_strip_index(s->y) : -1;
-            if (idx >= 0 && idx != s->strip_idx) {
-                s->strip_idx = idx;
-                lradc_strip_post(s, lradc_strip_code[idx]);
-            }
         }
         break;
     default:
@@ -556,7 +515,6 @@ static void lradc_reset(DeviceState *dev)
     memset(s->delay, 0, sizeof(s->delay));
     memset(s->threshold, 0, sizeof(s->threshold));
     s->touch_down = false;
-    s->strip_idx = -1;
     for (int n = 0; n < MXS_LRADC_NUM_IRQ; n++) {
         qemu_set_irq(s->irqs[n], false);
     }
@@ -594,8 +552,6 @@ static void lradc_realize(DeviceState *dev, Error **errp)
 static const Property lradc_properties[] = {
     DEFINE_PROP_UINT32("x-max", MxsLradcState, x_max, 853),
     DEFINE_PROP_UINT32("y-max", MxsLradcState, y_max, 479),
-    DEFINE_PROP_LINK("edna2-mb", MxsLradcState, edna2_mb,
-                     TYPE_BRAIN_EDNA2_MB, DeviceState *),
 };
 
 static void lradc_class_init(ObjectClass *klass, const void *data)

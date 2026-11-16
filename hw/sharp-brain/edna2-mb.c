@@ -68,16 +68,13 @@ struct BrainEdna2MbState {
     uint8_t cmd;
 };
 
-void brain_edna2_mb_post_touchkey(BrainEdna2MbState *s, uint32_t code)
-{
-    /*
-     * Sidebar touchkey events are delivered by the sub-MCU as event
-     * codes in the +0x404 slot, which the guest's TouchSub thread
-     * polls.  (The same slot doubles as the command completion flag;
-     * the reference model posts touchkey codes there too.)
-     */
-    memcpy(&s->regs[REG_DONE], &code, sizeof(code));
-}
+/*
+ * Note: the sidebar touch keys are NOT delivered through this
+ * mailbox.  They are ordinary touch-panel points (x in [800, 854))
+ * that the guest's touch driver converts to key events via its
+ * AREA table; see lradc.c.  +0x404 is only the command completion
+ * flag below.
+ */
 
 static void edna2_mb_cmd_start(BrainEdna2MbState *s)
 {
