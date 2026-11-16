@@ -35,13 +35,25 @@
  *     it is read, so the loop exits at once; real-hardware SAIF
  *     dumps likewise show STAT = 0x80000050 (playback) /
  *     0x80010060 (SAIF1) with the underrun bit set.
+ *   - Stopping a stream (found in p19 by PC sampling of the
+ *     wedged guest on the ATR pronunciation screen): the driver's
+ *     stop routine (wavedev2_BU26154.dll +0x9FE4) first spins with
+ *     IRQs masked until HW_SAIF_STAT bit 0 (BUSY) reads 0, and
+ *     only then clears CTRL.RUN and waits for BUSY==0 with
+ *     RUN==0.  BUSY on hardware therefore reports a transfer in
+ *     flight, not the RUN state: it reads 0 while the port is
+ *     enabled but its FIFO has drained (the real-hardware dumps
+ *     above likewise read BUSY=0).  Slaving BUSY to RUN deadlocks
+ *     this routine and with it the whole guest UI.
  *
  * Model:
  *
  *   - STMP register layout (REG/SET/CLR/TOG aliases, SFTRST rising
  *     edge sets CLKGATE, as in misc.c): CTRL 0x00, STAT 0x10
- *     (PRESENT always set; BUSY/DMA_PREQ/FIFO_SERVICE read 1
- *     while running; the FIFO_*_IRQ bits are sticky latches in
+ *     (PRESENT always set; DMA_PREQ/FIFO_SERVICE read 1 while
+ *     running; BUSY reads 1 only while samples sit in the TX FIFO
+ *     awaiting drain, i.e. a transfer is in flight; the FIFO_*_IRQ
+ *     bits are sticky latches in
  *     s->stat, set on under/overrun events and cleared by the
  *     guest via STAT_CLR), DATA 0x20 (CPU writes feed the TX
  *     FIFO; receive samples become available at the sample rate
@@ -284,7 +296,17 @@ static uint64_t saif_read(void *opaque, hwaddr addr, unsigned size)
         uint32_t v = s->stat | SAIF_STAT_PRESENT;
 
         if (saif_running(s)) {
-            v |= SAIF_STAT_BUSY | SAIF_STAT_DMA_PREQ | SAIF_STAT_FIFO_SERVICE;
+            v |= SAIF_STAT_DMA_PREQ | SAIF_STAT_FIFO_SERVICE;
+            /*
+             * BUSY is a transfer-in-flight indication, not a copy
+             * of RUN: the guest's stream-stop routine waits for it
+             * to clear *before* it clears RUN (see header).  Our
+             * transfers complete synchronously, so the only samples
+             * ever in flight are those queued in the TX FIFO.
+             */
+            if (!fifo8_is_empty(&s->tx_fifo)) {
+                v |= SAIF_STAT_BUSY;
+            }
         }
         return v;
     }
