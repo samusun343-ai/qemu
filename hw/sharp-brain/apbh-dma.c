@@ -78,6 +78,28 @@ static void mxs_dma_set_error(MxsDmaState *s, int ch, uint32_t bits)
                   ch, bits);
 }
 
+/*
+ * Reset one channel, as HW_APBH/APBX_CHANNEL_CTRL's RESET_CHANNEL
+ * bit (16 + ch) does on hardware: the channel's state machine is
+ * reinitialised, its pending completion/error status is cleared
+ * (dropping its interrupt line), and its command pointer and
+ * semaphore are zeroed.  The WinCE DDK disposes of a channel this
+ * way at stream teardown: the ATR wave driver's stop path asserts
+ * RESET for the SAIF TX channel instead of clearing the final
+ * completion through its IST, so a model that treats CHANNEL_CTRL
+ * as inert storage leaves CTRL1's completion bit set forever and
+ * the guest livelocks in its interrupt dispatcher.
+ */
+static void mxs_dma_reset_channel(MxsDmaState *s, int ch)
+{
+    s->ctrl1 &= ~((1u << ch) | (1u << (ch + 16)));
+    s->ctrl2 &= ~(1u << ch);
+    s->nxctmdar[ch] = 0;
+    s->sema[ch] = 0;
+    s->bar[ch] = 0;
+    mxs_dma_irq_update(s, ch);
+}
+
 /* Read a CCW descriptor from guest memory. */
 static bool mxs_dma_read_desc(dma_addr_t addr,
                               uint32_t *next, uint32_t *bits,
@@ -423,6 +445,14 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
             s->channel_ctrl |= value;
         } else if (off == 8) {
             s->channel_ctrl &= ~value;
+        }
+        if (off != 8) {
+            /* bits written set in RESET_CHANNEL (16 + ch) take effect */
+            for (int i = 0; i < MXS_DMA_CHANNELS; i++) {
+                if (value & (1u << (i + 16))) {
+                    mxs_dma_reset_channel(s, i);
+                }
+            }
         }
         return;
     default:
