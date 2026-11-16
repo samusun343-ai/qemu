@@ -332,13 +332,20 @@ static void pxp_process(hwaddr next)
          * holds a packed 480x320 landscape frame (stride 960) with
          * the app's user-data UI, not a 720x480 one. Two overlay
          * groups follow the same rect packing:
-         *   +0x040 buf, +0x044 rect, +0x048 gate
-         *   +0x050 buf, +0x054 rect, +0x058 gate
-         * For ATR, +0x050 is an 80x480 sidebar strip (volume /
+         *   +0x040 buf, +0x044 rect, +0x048 OL0PARAM
+         *   +0x050 buf, +0x054 rect, +0x058 OL1PARAM
+         * (the set is the documented PXP_NEXT register set; the
+         * overlay parameter word carries ALPHA/FORMAT/ENABLE bits,
+         * cf. the Freescale PXP drivers' pxp_set_olparam()).  For
+         * ATR, +0x050 is an 80x480 sidebar strip (volume /
          * example / clear touchkey labels, read verbatim from its
          * buffer) at (0, 0) and +0x040 an 80x144 alarm tile at
-         * (0, 336); the strip's gate word is 0x41, the tile's 0x40,
-         * so bit 0 of the gate word is taken as "composited".
+         * (0, 336).  Both PARAM words carry 0x40 (the FORMAT
+         * field) and differ in bit 0 (ENABLE): the strip is always
+         * enabled (0x41); the tile's enable is set only while an
+         * alarm sounds (verified live in p15: a firing countdown
+         * timer flips it to 0x41), so bit 0 of the PARAM word is
+         * the composite gate.
          * Overlays are copied verbatim (no alpha model).
          *
          * Rects are in the device's landscape coordinates; the
@@ -411,8 +418,16 @@ static void pxp_process(hwaddr next)
                         }
                     }
                 }
-                /* Overlay groups at +0x040 / +0x050. */
-                for (g = 0; g < 2; g++) {
+                /*
+                 * Overlay groups at +0x040 (OL0) / +0x050 (OL1).
+                 * OL0 is composited last (on top): the guest leaves
+                 * the strip's (OL1) rows under the alarm tile's rect
+                 * blank and sets OL0's enable only while an alarm is
+                 * sounding (observed live: the countdown timer firing
+                 * flips OL0PARAM 0x40 -> 0x41), so OL0 must win the
+                 * overlap for the tile to be visible at all.
+                 */
+                for (g = 1; g >= 0; g--) {
                     uint32_t obuf, orect, ogate;
                     const uint8_t *osrc;
                     int gx, gy, gw, gh, row;
