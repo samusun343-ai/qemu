@@ -733,6 +733,17 @@ static const struct {
     { 0x14, 0x00000001 },   /* ENET     (div 1) */
     { 0x15, 0x00000001 },   /* HSADC    (div 1) */
     { 0x16, 0x00000001 },   /* FLEXCAN  (div 1) */
+    /*
+     * FRAC0/FRAC1: the boot ROM programs every fractional divider to
+     * 18, the pass-through setting (ref clock = 480 MHz x 18/18).
+     * EBOOT leaves PIXFRAC at 0x12 on this platform, and boot code
+     * that derives clock rates from the FRAC fields (e.g. U-Boot's
+     * mxs clock code computing the IO clock for the SSPs) divides by
+     * the field value, so a reset value of 0 is a divide-by-zero on
+     * real boot paths, not a cosmetic gap.
+     */
+    { 0x1b, 0x12121212 },   /* FRAC0: CPU/EMI/IO1/IO0 frac 18 */
+    { 0x1c, 0x12121212 },   /* FRAC1: PIX/HSADC/GPMI frac 18 */
 };
 
 static void mxs_misc_reset(DeviceState *dev)
