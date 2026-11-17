@@ -44,6 +44,9 @@
 #define ICOLL_INTR_SOFTIRQ  (1 << 1)
 #define ICOLL_INTR_FIQ      (1 << 0)
 
+#define ICOLL_CTRL_SFTRST   (1u << 31)
+#define ICOLL_CTRL_CLKGATE  (1u << 30)
+
 OBJECT_DECLARE_SIMPLE_TYPE(MxsIcollState, MXS_ICOLL)
 
 typedef struct MxsIcollState {
@@ -208,7 +211,9 @@ static void icoll_write(void *opaque, hwaddr addr, uint64_t value,
         BRAIN_LOG("icoll: LEVELACK 0x%x\n", (uint32_t)value);
         icoll_update(s);
         return;
-    case ICOLL_CTRL:
+    case ICOLL_CTRL: {
+        uint32_t old = s->ctrl;
+
         if (off == 0) {
             s->ctrl = value;
         } else if (off == 4) {
@@ -218,7 +223,20 @@ static void icoll_write(void *opaque, hwaddr addr, uint64_t value,
         } else {
             s->ctrl ^= value;
         }
+        /*
+         * SFTRST rising edge -> the block enters reset and its
+         * clock gates once (the stmp handshake, as in the other
+         * blocks): Linux's stmp_reset_block() asserts SFTRST on
+         * this register at irqchip init and polls for CLKGATE
+         * reading back set, so plain storage times the poll out.
+         * One-shot, so an explicit CLKGATE clear while SFTRST is
+         * still asserted sticks.
+         */
+        if (!(old & ICOLL_CTRL_SFTRST) && (s->ctrl & ICOLL_CTRL_SFTRST)) {
+            s->ctrl |= ICOLL_CTRL_CLKGATE;
+        }
         return;
+    }
     default:
         break;
     }
