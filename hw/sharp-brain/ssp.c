@@ -231,6 +231,7 @@ static void mxs_ssp_execute(MxsSspState *s)
         s->data_dir_read = !!(s->ctrl0 & CTRL0_READ);
         s->data_remaining = s->xfer_size;
         s->fifo_level = 0;
+        s->stage_pos = s->stage_len = 0;
         s->status |= STATUS_DATA_BUSY;
         if (s->data_dir_read) {
             /* pull the first FIFO words from the card immediately so
@@ -256,20 +257,51 @@ static void mxs_ssp_execute(MxsSspState *s)
 /* ------------------------------------------------------------------ */
 /* data handling                                                      */
 
+/*
+ * Refill the staging buffer from the card with one block-sized
+ * read (see the stage[] comment in brain.h).  data_remaining
+ * counts the bytes still on the card; staged bytes are already
+ * subtracted.  A stage tail of 1-3 bytes is kept and topped up, so
+ * word assembly never loses bytes at a refill boundary.
+ */
+static void ssp_stage_refill(MxsSspState *s)
+{
+    uint32_t avail = s->stage_len - s->stage_pos;
+    uint32_t n;
+
+    if (avail) {
+        memmove(s->stage, &s->stage[s->stage_pos], avail);
+    }
+    s->stage_pos = 0;
+    s->stage_len = avail;
+    n = MIN(s->data_remaining, sizeof(s->stage) - avail);
+    if (n) {
+        sdbus_read_data(&s->sdbus, &s->stage[avail], n);
+        s->stage_len += n;
+        s->data_remaining -= n;
+    }
+}
+
 static void mxs_ssp_fill_fifo(MxsSspState *s)
 {
     /* pull data from the card into the FIFO for CPU access */
-    while (s->data_dir_read && s->data_remaining >= 4 &&
-           s->fifo_level < SSP_FIFO_WORDS) {
-        uint8_t buf[4];
-        sdbus_read_data(&s->sdbus, buf, 4);
+    while (s->data_dir_read && s->fifo_level < SSP_FIFO_WORDS) {
+        if (s->stage_len - s->stage_pos < 4) {
+            if (s->data_remaining == 0) {
+                break;
+            }
+            ssp_stage_refill(s);
+            if (s->stage_len - s->stage_pos < 4) {
+                break;   /* card stream ended mid-word */
+            }
+        }
         /*
          * The SSP packs the first wire byte into bits [7:0] of the
          * FIFO word (u-boot mxsmmc reads the data register directly
          * as native-endian 32-bit words).
          */
-        s->fifo[s->fifo_level++] = ldl_le_p(buf);
-        s->data_remaining -= 4;
+        s->fifo[s->fifo_level++] = ldl_le_p(&s->stage[s->stage_pos]);
+        s->stage_pos += 4;
     }
     if (s->data_remaining == 0) {
         s->status &= ~STATUS_DATA_BUSY;
@@ -352,8 +384,11 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
          * validates (volume BPBs) - the mount chain then dies silently.
          */
         uint32_t fifo_bytes = s->fifo_level * 4;
-        uint32_t n = MIN(len, fifo_bytes + s->data_remaining);
+        uint32_t stage_avail = s->stage_len - s->stage_pos;
+        uint32_t n = MIN(len, fifo_bytes + stage_avail +
+                         s->data_remaining);
         uint32_t from_fifo = MIN(n, fifo_bytes) & ~3u;
+        uint32_t done = from_fifo;
 
         for (unsigned w = 0; w < from_fifo / 4; w++) {
             stl_le_p(&buf[w * 4], s->fifo[w]);
@@ -363,11 +398,17 @@ int mxs_ssp_dma_data(MxsSspState *s, bool to_device,
                     (s->fifo_level - from_fifo / 4) * sizeof(uint32_t));
             s->fifo_level -= from_fifo / 4;
         }
-        if (n > from_fifo) {
-            sdbus_read_data(&s->sdbus, buf + from_fifo, n - from_fifo);
-            s->data_remaining -= n - from_fifo;
-        } else if (s->data_remaining < n) {
-            s->data_remaining = 0;
+        /* then the staged bytes, then whatever is still on the card */
+        if (done < n) {
+            uint32_t from_stage = MIN(n - done, stage_avail);
+
+            memcpy(buf + done, &s->stage[s->stage_pos], from_stage);
+            s->stage_pos += from_stage;
+            done += from_stage;
+        }
+        if (done < n) {
+            sdbus_read_data(&s->sdbus, buf + done, n - done);
+            s->data_remaining -= n - done;
         }
         res = address_space_write(&address_space_memory, bufaddr,
                                   MEMTXATTRS_UNSPECIFIED, buf, n);
@@ -599,6 +640,7 @@ static void mxs_ssp_reset(DeviceState *dev)
     s->fifo_level = 0;
     s->data_remaining = 0;
     s->data_dir_read = false;
+    s->stage_pos = s->stage_len = 0;
     s->version = 0x04000000;    /* imx28 SSP v4.0 magic-ish */
 }
 

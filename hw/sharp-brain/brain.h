@@ -257,6 +257,21 @@ struct MxsSspState {
     uint32_t fifo_level;        /* words available */
     bool data_dir_read;
     uint32_t data_remaining;
+
+    /*
+     * Read staging buffer: bytes pulled from the card in one
+     * block-sized sdbus_read_data() but not yet consumed by the
+     * FIFO or a DMA descriptor.  The card bus charges a large
+     * per-call overhead, and the boot loader reads the whole NK
+     * image through the DATA register one word at a time, so
+     * pulling 4 bytes per call made a boot spend ~14 s of host CPU
+     * in ~7.8M tiny card reads (measured in the p26 profiling
+     * pass); staging a full block per call removes that without
+     * changing anything the guest can observe.
+     */
+    uint8_t stage[512];
+    uint32_t stage_pos;         /* next unconsumed byte */
+    uint32_t stage_len;         /* valid bytes in stage[] */
 };
 
 /* called by the DMA engine (channel n = SSP n) */
