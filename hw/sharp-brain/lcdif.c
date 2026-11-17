@@ -247,15 +247,16 @@ static void lcdif_vsync_tick(void *opaque)
 }
 
 /* FNV-1a checksum over a host buffer (fast framebuffer change check) */
-static uint32_t lcdif_crc_host(const uint8_t *p, size_t len)
+static uint32_t lcdif_crc_update(uint32_t h, const uint8_t *p, size_t len)
 {
-    uint32_t h = 0x811c9dc5u;
     for (size_t i = 0; i < len; i++) {
         h ^= p[i];
         h *= 0x01000193u;
     }
     return h;
 }
+
+
 
 /* checksum of a guest-memory region, read in 4 KiB chunks */
 static uint32_t lcdif_crc_guest(hwaddr buf, uint32_t len)
@@ -363,14 +364,34 @@ static uint32_t lcdif_count(MxsLcdifPriv *s)
  * Master-mode frame push: stream words from the buffer through the
  * 8080 bus into the panel (RAMWR stream).  Each 32-bit memory word
  * carries two 16-bit bus transfers.
+ *
+ * The transfer count is guest-controlled (two 16-bit fields), so
+ * the word total can reach ~2^32.  The push used to stage the whole
+ * transfer in one g_malloc(total * 2): the size_t multiplication
+ * wrapped for totals above 2^31 while the streaming loop still ran
+ * to the unwrapped count, reading far past the allocation - a
+ * guest could crash the emulator by programming TRANSFER_COUNT
+ * (reproduced from the U-Boot prompt: h=0xffff, v=0x8001 ->
+ * SIGSEGV).  Stream in fixed chunks instead, and clamp the count
+ * to twice the panel's pixel count: a push targets one panel
+ * window (at most one full frame, and with 32-bit packing a full
+ * frame needs only half the words), so larger counts cannot come
+ * from a real driver; on hardware the panel address counter would
+ * just wrap inside its window.
  */
+#define LCDIF_MASTER_CHUNK_WORDS 4096
+#define LCDIF_MASTER_MAX_WORDS \
+    (ILI9805_NATIVE_WIDTH * ILI9805_NATIVE_HEIGHT * 2)
+
 static void lcdif_run_master(MxsLcdifPriv *s)
 {
     uint32_t total = lcdif_count(s);
     bool is_data = s->ctrl & BM_CTRL_DATA_SELECT;
     hwaddr buf = s->cur_buf;
     uint32_t done = 0;
-    uint8_t *mem;
+    uint8_t mem[LCDIF_MASTER_CHUNK_WORDS * 2];
+    uint32_t crc = 0x811c9dc5u;
+    bool full_frame, ok = true;
 
     BRAIN_LOG(
                   "brain-lcdif: master run: count=%ux%u total=%u "
@@ -383,31 +404,45 @@ static void lcdif_run_master(MxsLcdifPriv *s)
         lcdif_transfer_done(s);
         return;
     }
+    if (total > LCDIF_MASTER_MAX_WORDS) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "mxs-lcdif: transfer count %u exceeds panel "
+                      "capacity, clamped to %d\n",
+                      total, LCDIF_MASTER_MAX_WORDS);
+        total = LCDIF_MASTER_MAX_WORDS;
+    }
+    full_frame = total == (uint32_t)(ILI9805_NATIVE_WIDTH *
+                                     ILI9805_NATIVE_HEIGHT);
 
-    mem = g_malloc(total * 2 + 4);
-    if (address_space_read(&address_space_memory, buf,
-                           MEMTXATTRS_UNSPECIFIED, mem,
-                           total * 2) != MEMTX_OK) {
-        g_free(mem);
+    while (done < total) {
+        uint32_t n = MIN(total - done, LCDIF_MASTER_CHUNK_WORDS);
+
+        if (address_space_read(&address_space_memory, buf + done * 2,
+                               MEMTXATTRS_UNSPECIFIED, mem,
+                               n * 2) != MEMTX_OK) {
+            ok = false;
+            break;
+        }
+        if (full_frame) {
+            crc = lcdif_crc_update(crc, mem, n * 2);
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            panel_word(s, lduw_le_p(&mem[i * 2]), is_data);
+        }
+        done += n;
+    }
+    if (!ok) {
         lcdif_transfer_done(s);
         return;
     }
 
-    while (done < total) {
-        uint16_t bus_word = lduw_le_p(&mem[done * 2]);
-        panel_word(s, bus_word, is_data);
-        done++;
-    }
-
     /* remember the full framebuffer for the VSYNC dirty re-push
      * (only a full-frame push establishes the framebuffer base) */
-    if (total == (uint32_t)(ILI9805_NATIVE_WIDTH *
-                            ILI9805_NATIVE_HEIGHT)) {
+    if (full_frame) {
         s->full_frame_buf = buf;
-        s->full_frame_crc = lcdif_crc_host(mem, total * 2);
+        s->full_frame_crc = crc;
         s->vsync_repush_counter = 0;
     }
-    g_free(mem);
 
     /* swap buffers like the hardware */
     s->cur_buf = s->next_buf;
