@@ -497,11 +497,13 @@ void mxs_pinctrl_rearm_kbd_irq(DeviceState *dev);
 /*
  * Public: observe GPIO output changes.
  *
- * The matrix keyboard derives the column levels from the row drive
+ * The matrix keyboard derives the readable levels from the drive
  * state in the pinctrl DOUT/DOE registers, so it needs to be
- * notified whenever the guest re-drives the row pins (GPIO4).  The
- * callback receives the new "effective output" value (DOUT & DOE)
- * of the bank that changed.
+ * notified whenever the guest re-drives a matrix bank: the row
+ * pins (GPIO4) for the WinCE scan direction, the column pins
+ * (GPIO2_16..21, GPIO4_8) for the Brainux one.  The callback
+ * receives the new "effective output" value (DOUT & DOE) of the
+ * bank that changed.
  */
 typedef void MxsGpioOutNotify(void *opaque, int bank, uint32_t out);
 
