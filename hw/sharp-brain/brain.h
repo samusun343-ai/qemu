@@ -345,6 +345,19 @@ struct MxsLcdifPriv {
      * the icons land in the main area.) */
     hwaddr full_frame_buf;
     uint32_t full_frame_crc;
+    /* Panel configuration in effect when the frame above was
+     * captured; the VSYNC re-push re-streams the framebuffer under
+     * this configuration, not under whatever partial-window state a
+     * later push left behind. */
+    uint8_t full_frame_mac;
+    uint32_t full_frame_col_start, full_frame_col_end;
+    uint32_t full_frame_page_start, full_frame_page_end;
+    /* CRC of a changed framebuffer seen at the previous re-push
+     * check: a changed frame is only re-streamed once its content
+     * has been stable across two consecutive checks, so memory a
+     * boot stage is still writing through (a previous stage's
+     * framebuffer being reused) is never painted on the panel. */
+    uint32_t full_frame_pending_crc;
     int vsync_repush_counter;
 
     /* debug: remaining DATA writes to log after a RAMWR */

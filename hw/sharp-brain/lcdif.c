@@ -351,12 +351,35 @@ static uint32_t lcdif_crc_guest(hwaddr buf, uint32_t len)
  * The full frame is used (not the last pushed region) because the
  * last push is often the small menu-bar strip while the content
  * lands in the main area.
+ *
+ * Two safeguards keep this heuristic from painting things the real
+ * panel never would:
+ *
+ * - The frame is re-streamed under the panel configuration (MAC and
+ *   window) it was captured with, and the live configuration is
+ *   restored afterwards; a guest that reconfigured the panel since
+ *   (e.g. the Brainux driver, which runs the panel transposed) is
+ *   not corrupted by a re-stream in the capture's geometry.
+ *
+ * - A changed framebuffer is only re-streamed once its content has
+ *   been stable across two consecutive checks.  A boot chain hands
+ *   RAM over between stages: the previous stage's framebuffer
+ *   address (captured here) is reused as scratch by the next stage,
+ *   whose writes change the CRC on every check while it works.
+ *   Without the stability rule the re-push painted that transient
+ *   memory content on the panel during the U-Boot -> kernel
+ *   handover (vertical-stripe garbage); the real panel, whose GRAM
+ *   nothing re-reads, simply keeps showing the last pushed frame.
  */
 static void lcdif_repush_if_dirty(MxsLcdifPriv *s)
 {
     uint32_t total = ILI9805_NATIVE_WIDTH * ILI9805_NATIVE_HEIGHT;
     uint32_t crc;
     uint8_t *mem;
+    uint8_t save_mac;
+    uint32_t save_col_start, save_col_end, save_page_start, save_page_end;
+    uint32_t save_gram_x, save_gram_y;
+    bool save_write_active;
 
     if (!s->panel_on || (s->ctrl & BM_CTRL_RUN)) {
         return;
@@ -367,8 +390,16 @@ static void lcdif_repush_if_dirty(MxsLcdifPriv *s)
     s->vsync_repush_counter = 0;
     crc = lcdif_crc_guest(s->full_frame_buf, total * 2);
     if (crc == s->full_frame_crc) {
+        s->full_frame_pending_crc = 0;
         return;
     }
+    if (crc != s->full_frame_pending_crc) {
+        /* first sighting of this content: wait one more check to
+         * make sure the guest has finished writing the frame */
+        s->full_frame_pending_crc = crc;
+        return;
+    }
+    s->full_frame_pending_crc = 0;
     mem = g_malloc(total * 2 + 4);
     if (address_space_read(&address_space_memory, s->full_frame_buf,
                            MEMTXATTRS_UNSPECIFIED, mem,
@@ -376,17 +407,40 @@ static void lcdif_repush_if_dirty(MxsLcdifPriv *s)
         g_free(mem);
         return;
     }
-    /* re-stream the full frame through the panel as a RAMWR stream */
-    s->col_start = 0;
-    s->col_end = ILI9805_NATIVE_WIDTH - 1;
-    s->page_start = 0;
-    s->page_end = ILI9805_NATIVE_HEIGHT - 1;
-    s->gram_x = s->col_start;
-    s->gram_y = s->page_start;
+    /* re-stream the full frame through the panel as a RAMWR stream,
+     * under the configuration it was captured with */
+    save_mac = s->mac;
+    save_col_start = s->col_start;
+    save_col_end = s->col_end;
+    save_page_start = s->page_start;
+    save_page_end = s->page_end;
+    save_gram_x = s->gram_x;
+    save_gram_y = s->gram_y;
+    save_write_active = s->write_active;
+    s->mac = s->full_frame_mac;
+    s->col_start = s->full_frame_col_start;
+    s->col_end = s->full_frame_col_end;
+    s->page_start = s->full_frame_page_start;
+    s->page_end = s->full_frame_page_end;
+    if (s->mac & MAC_MV) {
+        s->gram_x = s->page_start;
+        s->gram_y = s->col_start;
+    } else {
+        s->gram_x = s->col_start;
+        s->gram_y = s->page_start;
+    }
     s->write_active = true;
     for (uint32_t i = 0; i < total; i++) {
         panel_word(s, lduw_le_p(&mem[i * 2]), true);
     }
+    s->mac = save_mac;
+    s->col_start = save_col_start;
+    s->col_end = save_col_end;
+    s->page_start = save_page_start;
+    s->page_end = save_page_end;
+    s->gram_x = save_gram_x;
+    s->gram_y = save_gram_y;
+    s->write_active = save_write_active;
     g_free(mem);
     s->full_frame_crc = crc;
     if (s->dirty) {
@@ -494,10 +548,17 @@ static void lcdif_run_master(MxsLcdifPriv *s)
     }
 
     /* remember the full framebuffer for the VSYNC dirty re-push
-     * (only a full-frame push establishes the framebuffer base) */
+     * (only a full-frame push establishes the framebuffer base),
+     * together with the panel configuration it was pushed under */
     if (full_frame) {
         s->full_frame_buf = buf;
         s->full_frame_crc = crc;
+        s->full_frame_mac = s->mac;
+        s->full_frame_col_start = s->col_start;
+        s->full_frame_col_end = s->col_end;
+        s->full_frame_page_start = s->page_start;
+        s->full_frame_page_end = s->page_end;
+        s->full_frame_pending_crc = 0;
         s->vsync_repush_counter = 0;
     }
 
@@ -826,6 +887,10 @@ static void lcdif_reset(DeviceState *dev)
     s->write_active = false;
     s->full_frame_buf = 0;
     s->full_frame_crc = 0;
+    s->full_frame_mac = 0;
+    s->full_frame_col_start = s->full_frame_col_end = 0;
+    s->full_frame_page_start = s->full_frame_page_end = 0;
+    s->full_frame_pending_crc = 0;
     s->vsync_repush_counter = 0;
     memset(s->gram, 0, sizeof(uint16_t) * ILI9805_NATIVE_WIDTH *
            ILI9805_NATIVE_HEIGHT);
