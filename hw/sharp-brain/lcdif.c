@@ -83,15 +83,45 @@ static void panel_invalidate(MxsLcdifPriv *s)
 /*
  * Advance the GRAM write position.
  *
- * The address counter always walks the CASET (column) coordinate first
- * and wraps into the PASET (page) coordinate - for the Brain firmware
- * this holds in both MAC modes (verified against the WinCE display
- * driver's push pattern, see the geometry comment above
- * lcdif_gfx_update).  MV only changes how the panel scans the GRAM out
- * to the glass, which the console side models separately.
+ * With MV clear the address counter walks the CASET (column)
+ * coordinate first and wraps into the PASET (page) coordinate: the
+ * stream fills the window row by row in native panel coordinates.
+ * This is the WinCE firmware's mode (MAC 0xd0, CASET 0..479,
+ * PASET 0..853, portrait raster stream).
+ *
+ * With MV set (row/column exchange) the CASET counter addresses the
+ * panel's page axis (the 854-long native axis) and the PASET counter
+ * its column axis, and the CASET counter is the one that advances
+ * first: the stream fills the window down each native column.  This
+ * is the mode the Brainux "brain" DRM driver (and the U-Boot MPU LCD
+ * driver before it) uses to present a landscape framebuffer: it
+ * programs CASET 0..854 / PASET 0..480 and streams the 854x480 frame
+ * in landscape raster order, and the exchange lays it down in the
+ * portrait GRAM.  The counter ranges are clamped to the physical
+ * GRAM extents: the driver programs the CASET end as 854, one past
+ * the last usable index, and on the panel the counter wraps at the
+ * edge of the GRAM, which keeps the stream pitch at 854 rather than
+ * 855 (an unclamped wrap shears the image by one pixel per line).
  */
 static void panel_advance(MxsLcdifPriv *s)
 {
+    if (s->mac & MAC_MV) {
+        uint32_t col_end = MIN(s->col_end, ILI9805_NATIVE_HEIGHT - 1);
+        uint32_t page_end = MIN(s->page_end, ILI9805_NATIVE_WIDTH - 1);
+
+        if (s->gram_y < col_end) {
+            s->gram_y++;
+        } else {
+            s->gram_y = s->col_start;
+            if (s->gram_x < page_end) {
+                s->gram_x++;
+            } else {
+                s->gram_x = s->page_start;
+            }
+        }
+        return;
+    }
+
     if (s->gram_x < s->col_end) {
         s->gram_x++;
     } else {
@@ -110,12 +140,26 @@ static void panel_pixel(MxsLcdifPriv *s, uint16_t rgb565)
 
     uint32_t x = s->gram_x, y = s->gram_y;
 
-    /* apply MY/MX mirror around the panel edges */
-    if (s->mac & MAC_MY) {
-        y = ILI9805_NATIVE_HEIGHT - 1 - y;
-    }
-    if (s->mac & MAC_MX) {
-        x = ILI9805_NATIVE_WIDTH - 1 - x;
+    /*
+     * Apply the MX/MY mirrors around the panel edges.  MX reverses
+     * the CASET counter and MY the PASET counter; with MV set the
+     * counters drive the opposite GRAM axes, so the mirrors swap
+     * axes along with them.
+     */
+    if (s->mac & MAC_MV) {
+        if (s->mac & MAC_MX) {
+            y = ILI9805_NATIVE_HEIGHT - 1 - y;
+        }
+        if (s->mac & MAC_MY) {
+            x = ILI9805_NATIVE_WIDTH - 1 - x;
+        }
+    } else {
+        if (s->mac & MAC_MY) {
+            y = ILI9805_NATIVE_HEIGHT - 1 - y;
+        }
+        if (s->mac & MAC_MX) {
+            x = ILI9805_NATIVE_WIDTH - 1 - x;
+        }
     }
 
     if (x < ILI9805_NATIVE_WIDTH && y < ILI9805_NATIVE_HEIGHT) {
@@ -160,9 +204,14 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
             break;
         case ILI9805_RAMWR:
             s->write_active = true;
-            /* reset to window start */
-            s->gram_x = s->col_start;
-            s->gram_y = s->page_start;
+            /* reset to window start (the axes exchange under MV) */
+            if (s->mac & MAC_MV) {
+                s->gram_x = s->page_start;
+                s->gram_y = s->col_start;
+            } else {
+                s->gram_x = s->col_start;
+                s->gram_y = s->page_start;
+            }
             break;
         default:
             break;
@@ -188,7 +237,11 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
         if (s->cmd_pos == 4) {
             s->col_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->col_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
-            s->gram_x = s->col_start;
+            if (s->mac & MAC_MV) {
+                s->gram_y = s->col_start;
+            } else {
+                s->gram_x = s->col_start;
+            }
             BRAIN_LOG("brain-panel: CASET %u..%u\n",
                           s->col_start, s->col_end);
         }
@@ -200,7 +253,11 @@ static void panel_word(MxsLcdifPriv *s, uint32_t word, bool is_data)
         if (s->cmd_pos == 4) {
             s->page_start = (s->cmd_bytes[0] << 8) | s->cmd_bytes[1];
             s->page_end   = (s->cmd_bytes[2] << 8) | s->cmd_bytes[3];
-            s->gram_y = s->page_start;
+            if (s->mac & MAC_MV) {
+                s->gram_x = s->page_start;
+            } else {
+                s->gram_y = s->page_start;
+            }
             BRAIN_LOG("brain-panel: PASET %u..%u\n",
                           s->page_start, s->page_end);
         }
@@ -653,6 +710,15 @@ static const MemoryRegionOps lcdif_ops = {
  *     The opposite choice (GRAM[853-x][479-y]) shows the screen
  *     upside down.  The transform is constant - it only depends on
  *     how the panel is glued into the case.
+ *
+ * The one guest-controlled scan-out variation is the MAC GS bit
+ * (gate scan direction): with GS set the panel scans its gate lines
+ * in the opposite order along the native page axis, which flips
+ * the console's horizontal axis (console(x, y) = GRAM[x][y]).
+ * The Brainux driver sets GS together with MV: its write stream
+ * fills the GRAM with the landscape frame transposed (see
+ * panel_advance), and the GS scan flip is what presents it upright
+ * on the glass.
  */
 static bool lcdif_gfx_update(void *opaque)
 {
@@ -671,7 +737,8 @@ static bool lcdif_gfx_update(void *opaque)
         uint32_t *row = (uint32_t *)(dest + y * stride);
         for (int x = 0; x < w; x++) {
             int nx = y;
-            int ny = ILI9805_NATIVE_HEIGHT - 1 - x;
+            int ny = (s->mac & MAC_GS)
+                ? x : ILI9805_NATIVE_HEIGHT - 1 - x;
             uint16_t rgb = (nx >= 0 && ny >= 0)
                 ? s->gram[ny * ILI9805_NATIVE_WIDTH + nx] : 0;
             int r = ((rgb >> 11) & 0x1f) << 3;
