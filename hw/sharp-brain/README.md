@@ -148,23 +148,20 @@ All mxs register blocks use the 16-byte "stmp" layout
 
 ### Keyboard (PW-SH6 matrix, from linux-brain `imx28-pwsh6.dts`)
 
-8 rows (guest-driven outputs, GPIO4_0..4_7) x 7 columns (inputs,
-GPIO2_16..2_21 + GPIO4_8, pulled up). The scan direction is
-rows-out / columns-in: the driver drives the rows low and arms
-PINCTRL level interrupts on the columns (a pressed key pulls its
-column low). This was proven by tracing the guest's own GPIO
-programming (boottest16): it sets DOE for GPIO4_0..7, drives
-DOUT low, and programs PIN2IRQ/IRQLEV/IRQPOL/IRQEN for
-GPIO2_16..21 + GPIO4_8. The model therefore injects keypresses
-as column levels, and pulls the columns up at realise, so the
-driver sees idle-high columns when it arms the IRQs (without
-the pull-ups the columns read low, the level IRQ fires
-immediately on enable, and the driver tears the IRQs back down
-- which is why host keys were silently ignored before this fix).
-Keys map to a standard PC-style map plus a `symbols` key
-(matrix 2,4) that acts as a modifier selecting the alternate
-blue legends (numbers/symbols) - the same trick the real
-hardware uses.
+The matrix has 7 used rows x 7 columns.  Rows are on GPIO4 (bits
+0,1,2,3,4,6,7 -- GPIO4_5 is not a row), columns on GPIO2_16..21
+plus GPIO4_8.  The two guest systems scan it in opposite
+directions, and the model serves both from the same contact state:
+
+* WinCE drives the rows (GPIO4 outputs) and reads the columns,
+  arming PINCTRL level interrupts on them (a pressed key pulls its
+  column low).  The model pulls the columns up at realise so the
+  driver sees idle-high columns when it arms the IRQs.
+* Brainux/Linux drives the columns (its DTB calls them
+  `matrix-out-gpios`) and reads the rows (`matrix-in-gpios`), so a
+  pressed key must pull its *row* low while its column is driven
+  low.  (This direction was missing until 2026-11-17: the Linux
+  keyboard produced no events at all.)
 
 The physical PW-SH6 keyboard has 46 keys (linux-brain
 `imx28-pwsh6.dts`, including the two entries its keymap only comments
@@ -179,64 +176,137 @@ SHARP's PW-SS6/SH6/SB6 Quick Reference):
     row5  P        O        一覧      Enter    Z        W       国語
     row6  Minus    L        R         Space    音声     S       英和
 
-Host keyboard -> guest mapping policy (per project requirements):
-plain PC keys map 1:1 where the Brain has the same key; Brain keys
-with no PC equivalent are reached through Ctrl+letter combinations;
-the symbols layer reproduces the blue legends by holding the 記号
-contact together with the base key, exactly like the real keyboard.
-Host keys with no Brain counterpart (Tab, F1-F12, CapsLock, End,
-...) are intentionally unmapped -- the matrix has no contact for
-them.  Power is not a matrix key at all (it is the PSWITCH pin).
+The blue legends printed next to the QWERTY keys are the symbols
+layer, typed on the real keyboard by holding 記号 (row2 col4)
+together with the base key:
 
-Complete host-key table (brain-kbd.c, layout "pw-sh6"):
+    Q=1  W=2  E=3  R=4  T=5  Y=6  U=7  I=8  O=9  P=0
+    D=`  F==  G=\  H=;  J='  K=[  L=]  N="  M=.  Minus=/
 
-| host key(s) | contact | note |
+Holding Shift as well gives the US-shifted forms of those glyphs
+(! @ # $ % ^ & * ( ) ~ + | : " { } < > ? and _ on Minus).  The
+special keys （履歴， PageUp, My辞書, Home, 削除, Shift, 一覧，
+国語, 音声, 英和） have identity entries in the symbols layer,
+which is what makes the two-stage function combos work: 記号+Home
+= 検索 (search), 記号+一覧 = マーカー (marker), 記号+英和 =
+英和/和英 toggle, 記号+音声 = 文字切替.
+
+Host keyboard -> guest mapping policy (brain-kbd.c, layout
+"pw-sh6"): letters map 1:1 QWERTY; digits and punctuation are
+produced by holding the 記号 contact together with the base key,
+exactly like the real keyboard; Brain-only keys are reached
+through Ctrl+letter combinations (below).  Everything on the
+physical keyboard is reachable this way.
+
+Host keycodes are positional, and the glyph printed on a
+positional key differs between US and JIS keyboards (the keycode
+that is "[" on a US keyboard is "@" on a JIS one).  The device
+property
+
+    -global brain-kbd.host-layout=jis     (default)
+    -global brain-kbd.host-layout=us
+
+selects which printing the mapping follows, so the glyph on the
+host key is the glyph that gets typed.  The default is "jis": the
+Brain is a Japanese-market device.  Layout differences:
+
+* Five positional keys get different chords in JIS mode:
+  KEY_EQUAL "^" (US: "="), KEY_LEFTBRACE "@" (US: "["),
+  KEY_RIGHTBRACE "[" (US: "]"), KEY_BACKSLASH "]" (US: "\"),
+  KEY_APOSTROPHE ":" (US: "'").
+* Shifted glyphs: in US mode every shifted glyph follows from the
+  plain chord plus the passed-through host Shift contact.  JIS
+  mode has its own shifted table for the keys whose shifted
+  printing differs: 2 `"`, 6 `&`, 7 `'`, 8 `(`, 9 `)`, Minus `=`,
+  Equal `~`, Leftbrace `` ` ``, Semicolon `+`, Apostrophe `*`.
+  (The 7/`'` and Minus/`=` cases live on the *plain* symbols layer
+  although the JIS key needs Shift for them, so the model
+  suppresses the host Shift contact while they are held.)
+* Keys that only exist on JIS (or ISO) keyboards have explicit
+  assignments in both layouts -- none of them is a dead key:
+  Yen -> 記号+G (`\`; with Shift `|`, the key's own shifted
+  legend; the Brain has no ¥ legend), Ro -> Shift+Minus (`_`),
+  Henkan -> Space (the Brain Space key is スペース・変換）,
+  Muhenkan -> Space, Zenkakuhankaku -> the 記号 key itself,
+  KatakanaHiragana -> 記号, 102nd -> `\`, KPComma -> 記号+N (`,`).
+
+Complete host-key table (plain keys; S = the chord also holds
+記号, Sh = the chord also holds Shift):
+
+| host key(s) | result | note |
 |---|---|---|
 | A..Z (QWERTY letters) | direct 1:1 | the 26 matrix letter keys |
 | Space, Enter/KpEnter, Backspace | direct | |
-| Delete | row4 col0 | alias for the Brain 削除 (Backspace) key |
+| Delete | 削除 (row4 col0) | alias for the Brain Backspace key |
 | Up/Down/Left/Right | direct | the 4-way cursor pad |
-| Left/Right Shift | direct | Shift (either one; refcounted) |
-| Esc | row0 col3 | 戻る -- SHARP calls this key the "Escape key" |
-| Home | row3 col6 | Brain Home key |
-| PageUp / PageDown | direct | row1 col4 / row3 col4 |
-| Insert | row1 col2 | alias for History |
-| Minus / KpMinus | direct | |
-| 1..0, Kp0..Kp9 | symbols layer | 記号 + Q/W/E/R/T/Y/U/I/O/P (blue legends) |
-| ` = [ ] \ ; ' , . / | symbols layer | 記号 + base key (blue legends) |
-| Ctrl+B | row0 col3 | 戻る (back) -- same contact as Esc |
-| Ctrl+H | row1 col2 | 履歴 History |
-| Ctrl+D | row3 col2 | マイ辞書 (my dictionary) |
-| Ctrl+L | row5 col2 | 一覧 (list) |
-| Ctrl+K | row5 col6 | 国語 (Japanese dictionary) |
-| Ctrl+J | row6 col6 | 英和 (English-Japanese dictionary) |
-| Ctrl+V | row6 col4 | 音声 (voice) |
-| Ctrl+S | row2 col4 | hold 記号 (symbols modifier) |
-| Ctrl+M | row5 col2 + symbols | マーカー (marker) |
-| Ctrl+F | row3 col6 + symbols | 検索 (search) |
+| Left/Right Shift | Shift | either one; refcounted |
+| Esc | 戻る (row0 col3) | SHARP calls this key the "Escape key" |
+| Home | Home (row3 col6) | |
+| PageUp / PageDown | row1 col4 / row3 col4 | direct |
+| Insert | 履歴 (row1 col2) | alias for History |
+| Minus / KpMinus | Minus | direct |
+| 1..0, Kp0..Kp9 | S + Q/W/E/R/T/Y/U/I/O/P | the blue digit legends |
+| ` = [ ] \ ; ' , . / and Kp operators | S + base key | the blue symbol legends |
+| JIS-only keys (Yen, Ro, Henkan, ...) | see above | |
 
-Everything on the physical PW-SH6 keyboard is reachable this way.
-The symbols layer also has function-key legends -- 検索 (symbols +
-Home), マーカー (symbols + 一覧), the 英和/和英 toggle (symbols +
-英和) and 文字切替 (symbols + 音声) -- reachable by holding 記号
-(Ctrl+S) and then pressing the corresponding key/combo.
+Ctrl combinations for the Brain-only keys:
 
-Two model behaviours worth knowing:
+| combo | contact | meaning |
+|---|---|---|
+| Ctrl+B | 戻る | back (same contact as Esc) |
+| Ctrl+H | 履歴 | History |
+| Ctrl+D | My辞書 | my dictionary |
+| Ctrl+L | 一覧 | list |
+| Ctrl+K | 国語 | Japanese dictionary |
+| Ctrl+J | 英和 | English-Japanese dictionary |
+| Ctrl+V | 音声 | voice |
+| Ctrl+S | 記号 (hold) | symbols modifier itself: hold it, then press Home/一覧/英和/音声 for 検索/マーカー/toggle/文字切替 |
+| Ctrl+M | 一覧 + S | マーカー (marker) |
+| Ctrl+F | Home + S | 検索 (search) |
+
+Intentionally unmapped host keys (the matrix has no contact for
+them): Tab, CapsLock, F1-F12, Alt, Meta, End, Print, ScrollLock,
+Pause, Compose.  Power is not a matrix key at all (it is the
+PSWITCH pin).
+
+Documented approximations: JIS Shift+0 types a plain "0" (the JIS
+key has no shifted glyph of its own); in JIS mode the Grave key
+(which a JIS keyboard does not have) keeps its US chord; the Yen
+key produces `\` / `|` because the Brain has no ¥ legend.
+
+Model behaviours worth knowing:
 
 * Key-down mappings are latched per host key and contacts are
-  refcounted.  Releasing Ctrl before the letter key (or pressing it
-  after) therefore cannot leave a combo contact stuck closed, and
-  overlapping symbols-layer keys keep the 記号 contact held until
-  the last one is released.
+  refcounted.  Releasing Ctrl before the letter key (or pressing
+  it after) therefore cannot leave a combo contact stuck closed,
+  and overlapping symbols-layer keys keep the 記号 contact held
+  until the last one is released.  Ctrl/Shift state is tracked per
+  physical key, so frontend autorepeat of a held modifier cannot
+  inflate it (a held Ctrl used to make every later key a combo
+  key).
+* The Shift contact is driven by a single sync function: it is
+  closed when a host Shift key is down or a chord forces it
+  (Ro `_`, the JIS `^`/`@`/`:` chords), and opened while a chord
+  whose glyph sits on the plain symbols layer suppresses it
+  (JIS Shift+7 `'` etc.).
 * In the WinCE search fields the 記号 key is an app-visible
   keystroke, not a silent modifier: a bare press inserts "～" (the
-  blank-word operator, as in SHARP's manual: the Symbol key "enters
-  symbols such as ? or ～"), so a host digit keypress appears there
-  as "～" followed by the plain letter.  That is the guest software
-  treating the physically faithful chord; the model delivers both
-  contacts together, as the real keyboard does.  (Linux's
-  brain-kbd-gpio instead folds the symbols layer in the driver and
-  never reports the 記号 key itself.)
+  blank-word operator, as in SHARP's manual: the Symbol key
+  "enters symbols such as ? or ～"), so a host digit keypress
+  appears there as "～" followed by the plain letter.  That is
+  the guest software treating the physically faithful chord; the
+  model delivers both contacts together, as the real keyboard
+  does.
+* Brainux's brain-kbd-gpio folds the symbols layer in the driver
+  and never reports the 記号 key itself.  Two measured quirks of
+  that driver (properties of the guest driver, identical on real
+  hardware): within one scan pass the symbols layer only applies
+  to rows below the 記号 row -- chords on rows 0-1 report their
+  base key, and other keys in the 記号 row itself are not
+  reported; and while 記号 or Shift is held, other contacts in
+  its row are not reported (e.g. Shift+A types nothing on
+  Brainux).  The evdev audit in the project's regression set
+  (p27linux.py) encodes the measured behaviour per key.
 
 ## WinCE suspend/resume (works end to end)
 
