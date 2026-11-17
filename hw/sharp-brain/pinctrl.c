@@ -170,23 +170,45 @@ void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,
  * (GPIO2_16..21 = 0x3f0000, GPIO4_8 = 0x100).  Safe to call when no
  * key is pressed (columns high: no IRQ fires) and when a key is
  * held (column low: the IRQ fires, delivering the keypress).
+ *
+ * Only pins the guest currently holds as inputs are armed.  A pin
+ * the guest drives as an output is its own affair: arming the
+ * level-low keyboard configuration onto it makes the interrupt
+ * condition true forever (the guest itself holds the line low),
+ * and the resulting IRQ 125 storm starves the guest -- Linux, for
+ * example, drives GPIO2_21 as an output and wedged in probe until
+ * this gate was added.  For output pins the model-managed column
+ * bits are cleared instead, so an arming left over from an earlier
+ * input phase cannot fire either.  The reconcile runs not only
+ * from the keyboard model but also on every guest DOUT/DOE write
+ * to banks 2/4, so a pin the guest turns into an output is disarmed
+ * at that moment, not at some later keyboard event.
  */
-void mxs_pinctrl_rearm_kbd_irq(DeviceState *dev)
+static void pinctrl_reconcile_kbd(MxsPinctrlState *s)
 {
-    MxsPinctrlState *s = MXS_PINCTRL(dev);
-
     /* bank 2: columns 0..5 = GPIO2_16..21 */
-    s->pin2irq[2] |= 0x3f0000u;
-    s->irqen[2]   |= 0x3f0000u;
-    s->irqlev[2]  |= 0x3f0000u;
+    uint32_t in2 = 0x3f0000u & ~s->doe[2];
+    uint32_t out2 = 0x3f0000u & s->doe[2];
+
+    s->pin2irq[2] = (s->pin2irq[2] & ~out2) | in2;
+    s->irqen[2]   = (s->irqen[2]   & ~out2) | in2;
+    s->irqlev[2]  = (s->irqlev[2]  & ~out2) | in2;
     s->irqpol[2]  &= ~0x3f0000u;
     /* bank 4: column 6 = GPIO4_8 */
-    s->pin2irq[4] |= 0x100u;
-    s->irqen[4]   |= 0x100u;
-    s->irqlev[4]  |= 0x100u;
+    uint32_t in4 = 0x100u & ~s->doe[4];
+    uint32_t out4 = 0x100u & s->doe[4];
+
+    s->pin2irq[4] = (s->pin2irq[4] & ~out4) | in4;
+    s->irqen[4]   = (s->irqen[4]   & ~out4) | in4;
+    s->irqlev[4]  = (s->irqlev[4]  & ~out4) | in4;
     s->irqpol[4]  &= ~0x100u;
     pinctrl_update_irq(s, 2);
     pinctrl_update_irq(s, 4);
+}
+
+void mxs_pinctrl_rearm_kbd_irq(DeviceState *dev)
+{
+    pinctrl_reconcile_kbd(MXS_PINCTRL(dev));
 }
 
 /* public: register a GPIO output observer (matrix keyboard) */
@@ -345,6 +367,10 @@ static void pinctrl_write(void *opaque, hwaddr addr, uint64_t value,
                 /* DIN follows the pin output; the keyboard watches it */
                 pinctrl_update_irq(s, b);
                 pinctrl_notify_output(s, b);
+                if (b == 2 || b == 4) {
+                    /* a column pin may just have become an output */
+                    pinctrl_reconcile_kbd(s);
+                }
             } else if (irq_relevant) {
                 pinctrl_update_irq(s, b);
             }
