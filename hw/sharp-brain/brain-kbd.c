@@ -29,7 +29,20 @@
  *   - Digits and punctuation only exist as the blue "symbols" legend
  *     of the QWERTY keys (記号 modifier + key); pressing them on the
  *     host holds the symbols contact plus the base key contact, which
- *     is exactly what typing them on the real device does.
+ *     is exactly what typing them on the real device does.  Glyphs
+ *     on the Shift+symbols layer (the US-shifted forms of the blue
+ *     legends: ! @ # $ % ^ & * ( ) ~ + | : " { } < > ?) are reached
+ *     by holding the symbols and Shift contacts together with the
+ *     base key.
+ *   - Host keycodes are positional: the same keycode is printed
+ *     with a different glyph on a US and on a JIS keyboard (e.g.
+ *     KEY_LEFTBRACE is "[" on US, "@" on JIS).  The "host-layout"
+ *     property ("jis" by default -- the Brain is a Japanese-market
+ *     device -- or "us") selects the chord table so that the glyph
+ *     printed on the host key is the glyph the chord produces.
+ *     Keys that only exist on JIS keyboards (Yen, Ro, Henkan,
+ *     Muhenkan, Zenkakuhankaku, KatakanaHiragana) and the ISO
+ *     102nd key have explicit assignments in both layouts.
  *   - Brain-specific dictionary keys that have no PC equivalent
  *     (History, My辞書, 一覧, 国語, 音声, 英和, 記号,
  *     marker, search) are reached through Ctrl+letter combinations.
@@ -38,6 +51,8 @@
  *     key-up always releases the same contacts even if Ctrl was
  *     released first; contacts are refcounted because several host
  *     keys can hold one contact (both Shifts, the symbols layer).
+ *     Ctrl/Shift state is tracked per key so frontend autorepeat
+ *     cannot inflate it.
  */
 
 #include "qemu/osdep.h"
@@ -86,6 +101,8 @@
 
 #define D BRAIN_KEY_DIRECT
 #define S BRAIN_KEY_SYMBOL
+#define H BRAIN_KEY_SHIFT
+#define N BRAIN_KEY_NOSHIFT
 
 static const BrainKeyDef pwsh6_direct[KEY_CNT] = {
     /* letters (direct contacts) */
@@ -127,8 +144,8 @@ static const BrainKeyDef pwsh6_direct[KEY_CNT] = {
     [KEY_DOWN]                 = { 1, 3, D },   /* Down */
     [KEY_LEFT]                 = { 2, 3, D },   /* Left */
     [KEY_RIGHT]                = { 4, 3, D },   /* Right */
-    [KEY_LEFTSHIFT]            = { 4, 4, D },   /* Shift */
-    [KEY_RIGHTSHIFT]           = { 4, 4, D },
+    /* (the host Shift keys themselves are handled in the event path:
+     * they drive the Shift contact through brain_kbd_sync_shift()) */
     [KEY_ESC]                  = { 0, 3, D },   /* 戻る: SHARP's own manuals
                                                  * call this key the
                                                  * "Escape key" (returns to
@@ -178,6 +195,78 @@ static const BrainKeyDef pwsh6_direct[KEY_CNT] = {
     [KEY_KPMINUS]              = { 6, 0, D },
     [KEY_KPPLUS]               = { 1, 5, S },
     [KEY_KPEQUAL]              = { 1, 5, S },
+    [KEY_KPCOMMA]              = { 3, 0, S },   /* 記号+N = , */
+
+    /*
+     * Keys that exist only on JIS (or ISO) host keyboards.  These
+     * keycodes never arrive from a US keyboard, so the assignments
+     * are the same in both host layouts.
+     */
+    [KEY_YEN]                  = { 4, 1, S },   /* ¥: 記号+G = \ (the
+                                                 * Brain has no ¥
+                                                 * legend; \ is its
+                                                 * glyph.  With Shift:
+                                                 * 記号+Shift+G = |,
+                                                 * the JIS key's own
+                                                 * shifted legend) */
+    [KEY_RO]                   = { 6, 0, D | H }, /* _: Shift+Minus
+                                                 * (the Brain's shift
+                                                 * legend for Minus) */
+    [KEY_102ND]                = { 4, 1, S },   /* ISO extra key: \ */
+    [KEY_HENKAN]               = { 6, 3, D },   /* 変換 = Space (the
+                                                 * Brain Space key is
+                                                 * スペース・変換) */
+    [KEY_MUHENKAN]             = { 6, 3, D },   /* 無変換: Space alias */
+    [KEY_ZENKAKUHANKAKU]       = { SYM_ROW, SYM_COL, D }, /* the 記号
+                                                 * key itself: the
+                                                 * Brain's input-mode
+                                                 * key */
+    [KEY_KATAKANAHIRAGANA]     = { SYM_ROW, SYM_COL, D }, /* ditto */
+};
+
+/*
+ * JIS host layout: overrides over pwsh6_direct for the positional
+ * keycodes whose printed glyph differs from US.  The chord for each
+ * key produces the glyph printed on the JIS key:
+ *   KEY_EQUAL      "^"  = 記号+Shift+Y   (US: "=" = 記号+F)
+ *   KEY_LEFTBRACE  "@"  = 記号+Shift+W   (US: "[" = 記号+K)
+ *   KEY_RIGHTBRACE "["  = 記号+K         (US: "]" = 記号+L)
+ *   KEY_BACKSLASH  "]"  = 記号+L         (US: "\" = 記号+G)
+ *   KEY_APOSTROPHE ":"  = 記号+Shift+H   (US: "'" = 記号+J)
+ * (KEY_SEMICOLON is ";" in both layouts and needs no override; its
+ * shifted form differs and lives in the shifted table.)
+ */
+static const BrainKeyDef pwsh6_jis_direct[KEY_CNT] = {
+    [KEY_EQUAL]                = { 0, 2, S | H },   /* ^ */
+    [KEY_LEFTBRACE]            = { 5, 5, S | H },   /* @ */
+    [KEY_RIGHTBRACE]           = { 1, 1, S },       /* [ */
+    [KEY_BACKSLASH]            = { 6, 1, S },       /* ] */
+    [KEY_APOSTROPHE]           = { 0, 1, S | H },   /* : */
+};
+
+/*
+ * JIS host layout, consulted when a host Shift key is held at
+ * key-down time.  JIS shifted glyphs that equal the US-shifted form
+ * of a symbols-layer chord (e.g. Shift+";" is "+" = 記号+Shift+F)
+ * just name the base key: the host Shift contact is already closed,
+ * so it supplies the Shift part of the chord.  Glyphs that live on
+ * the *plain* symbols layer although the JIS key needs Shift for
+ * them (Shift+7 is "'", Shift+- is "=") carry BRAIN_KEY_NOSHIFT so
+ * the host Shift contribution is suppressed while they are held.
+ */
+static const BrainKeyDef pwsh6_jis_shifted[KEY_CNT] = {
+    [KEY_2]                    = { 2, 1, S },       /* " = 記号+Shift+J */
+    [KEY_6]                    = { 2, 2, S },       /* & = 記号+Shift+U */
+    [KEY_7]                    = { 2, 1, S | N },   /* ' = 記号+J */
+    [KEY_8]                    = { 5, 1, S },       /* ( = 記号+Shift+O */
+    [KEY_9]                    = { 5, 0, S },       /* ) = 記号+Shift+P */
+    [KEY_0]                    = { 5, 0, S | N },   /* (no JIS glyph:
+                                                     * plain 0) */
+    [KEY_MINUS]                = { 1, 5, S | N },   /* = = 記号+F */
+    [KEY_EQUAL]                = { 0, 5, S },       /* ~ = 記号+Shift+D */
+    [KEY_LEFTBRACE]            = { 0, 5, S | N },   /* ` = 記号+D */
+    [KEY_SEMICOLON]            = { 1, 5, S },       /* + = 記号+Shift+F */
+    [KEY_APOSTROPHE]           = { 3, 1, S },       /* * = 記号+Shift+I */
 };
 
 /*
@@ -198,11 +287,18 @@ static const BrainKeyDef pwsh6_combo[KEY_CNT] = {
 };
 
 static const BrainKbdLayout pwsh6_layout = {
-    .name       = "pw-sh6",
-    .symbol_row = SYM_ROW,
-    .symbol_col = SYM_COL,
-    .direct     = pwsh6_direct,
-    .combo      = pwsh6_combo,
+    .name        = "pw-sh6",
+    .symbol_row  = SYM_ROW,
+    .symbol_col  = SYM_COL,
+    .shift_row   = 4,
+    .shift_col   = 4,
+    .direct      = pwsh6_direct,
+    .combo       = pwsh6_combo,
+    .jis_direct  = pwsh6_jis_direct,
+    .jis_shifted = pwsh6_jis_shifted,
+    .us_shifted  = NULL,    /* every US shifted glyph follows from the
+                             * plain entry plus the passed-through
+                             * host Shift contact */
 };
 
 static const BrainKbdLayout *brain_kbd_layouts[] = {
@@ -338,6 +434,27 @@ static void brain_kbd_set_contact(BrainKbdState *s, int r, int c, bool down)
 /* host keyboard input (events arrive as linux keycodes)               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Drive the Shift contact from its three contributions: entries
+ * that force it (BRAIN_KEY_SHIFT), the host Shift keys, and entries
+ * that suppress the host Shift keys (BRAIN_KEY_NOSHIFT).  This is
+ * the only path that touches the Shift contact, so it is applied
+ * exactly on transitions.
+ */
+static void brain_kbd_sync_shift(BrainKbdState *s)
+{
+    const BrainKbdLayout *l = s->layout;
+    bool want = s->shift_forced > 0 ||
+                ((s->lshift_down || s->rshift_down) &&
+                 s->shift_suppressed == 0);
+
+    if (want == s->shift_applied) {
+        return;
+    }
+    s->shift_applied = want;
+    brain_kbd_set_contact(s, l->shift_row, l->shift_col, want);
+}
+
 static void brain_kbd_apply(BrainKbdState *s, const BrainKeyDef *e, bool down)
 {
     const BrainKbdLayout *l = s->layout;
@@ -348,6 +465,22 @@ static void brain_kbd_apply(BrainKbdState *s, const BrainKeyDef *e, bool down)
     brain_kbd_set_contact(s, e->row, e->col, down);
     if (e->flags & BRAIN_KEY_SYMBOL) {
         brain_kbd_set_contact(s, l->symbol_row, l->symbol_col, down);
+    }
+    if (e->flags & BRAIN_KEY_SHIFT) {
+        if (down) {
+            s->shift_forced++;
+        } else if (s->shift_forced) {
+            s->shift_forced--;
+        }
+        brain_kbd_sync_shift(s);
+    }
+    if (e->flags & BRAIN_KEY_NOSHIFT) {
+        if (down) {
+            s->shift_suppressed++;
+        } else if (s->shift_suppressed) {
+            s->shift_suppressed--;
+        }
+        brain_kbd_sync_shift(s);
     }
 }
 
@@ -365,16 +498,37 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     key = evt->key.key;
     down = evt->key.down;
 
-    /* Ctrl only selects the dictionary-key combo table */
+    if (key >= KEY_CNT) {
+        return;
+    }
+
+    /*
+     * Ctrl only selects the dictionary-key combo table, and Shift
+     * drives the Shift contact through brain_kbd_sync_shift() (and
+     * selects the "shifted" table at key-down).  Both are tracked
+     * per key: frontends send autorepeat down events for a held
+     * modifier, and counting those would inflate the state so that
+     * the single matching key-up never clears it (Ctrl is the
+     * dangerous one: every later key would become a combo key).
+     */
     if (key == KEY_LEFTCTRL || key == KEY_RIGHTCTRL) {
-        if (down) {
-            s->ctrl_held++;
-        } else if (s->ctrl_held) {
-            s->ctrl_held--;
+        bool *slot = (key == KEY_LEFTCTRL) ? &s->lctrl_down
+                                           : &s->rctrl_down;
+        if (*slot != down) {
+            *slot = down;
+            s->ctrl_held = (s->lctrl_down ? 1 : 0) +
+                           (s->rctrl_down ? 1 : 0);
         }
         return;
     }
-    if (key >= KEY_CNT) {
+    if (key == KEY_LEFTSHIFT || key == KEY_RIGHTSHIFT) {
+        bool *slot = (key == KEY_LEFTSHIFT) ? &s->lshift_down
+                                            : &s->rshift_down;
+        if (*slot != down) {
+            *slot = down;
+            brain_kbd_sync_shift(s);
+            brain_kbd_recalc(s);
+        }
         return;
     }
 
@@ -402,9 +556,12 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     if (s->active[key].flags != 0) {
         return;                     /* autorepeat: already latched */
     }
-    e = &s->layout->direct[key];
+    e = &s->direct_resolved[key];
     if (s->ctrl_held && s->layout->combo[key].flags != 0) {
         e = &s->layout->combo[key];
+    } else if ((s->lshift_down || s->rshift_down) && s->shifted_tab &&
+               s->shifted_tab[key].flags != 0) {
+        e = &s->shifted_tab[key];
     }
     if (e->flags == 0) {
         return;
@@ -446,6 +603,37 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
                    s->layout_name);
         return;
     }
+
+    /*
+     * Resolve the host keyboard layout: host keycodes are
+     * positional, and the glyph printed on a positional keycode
+     * differs between US and JIS keyboards.  Default to JIS (the
+     * Brain is a Japanese-market device); US keyboard users set
+     * -global brain-kbd.host-layout=us.
+     */
+    if (!s->host_layout_name) {
+        s->host_layout_name = g_strdup("jis");
+    }
+    if (!strcmp(s->host_layout_name, "jis")) {
+        s->host_jis = true;
+    } else if (!strcmp(s->host_layout_name, "us")) {
+        s->host_jis = false;
+    } else {
+        error_setg(errp, "brain-kbd: unknown host-layout '%s' "
+                   "(expected \"us\" or \"jis\")", s->host_layout_name);
+        return;
+    }
+    memcpy(s->direct_resolved, s->layout->direct,
+           sizeof(s->direct_resolved));
+    if (s->host_jis && s->layout->jis_direct) {
+        for (int i = 0; i < KEY_CNT; i++) {
+            if (s->layout->jis_direct[i].flags != 0) {
+                s->direct_resolved[i] = s->layout->jis_direct[i];
+            }
+        }
+    }
+    s->shifted_tab = s->host_jis ? s->layout->jis_shifted
+                                 : s->layout->us_shifted;
     if (!s->pinctrl) {
         error_setg(errp, "brain-kbd: 'pinctrl' link not set");
         return;
@@ -471,6 +659,11 @@ static void brain_kbd_reset(DeviceState *dev)
 
     s->pressed = 0;
     s->ctrl_held = 0;
+    s->lctrl_down = s->rctrl_down = false;
+    s->lshift_down = s->rshift_down = false;
+    s->shift_forced = 0;
+    s->shift_suppressed = 0;
+    s->shift_applied = false;
     memset(s->active, 0, sizeof(s->active));
     memset(s->contact_refs, 0, sizeof(s->contact_refs));
     brain_kbd_recalc(s);
@@ -478,6 +671,7 @@ static void brain_kbd_reset(DeviceState *dev)
 
 static const Property brain_kbd_properties[] = {
     DEFINE_PROP_STRING("layout", BrainKbdState, layout_name),
+    DEFINE_PROP_STRING("host-layout", BrainKbdState, host_layout_name),
     DEFINE_PROP_LINK("pinctrl", BrainKbdState, pinctrl,
                      TYPE_MXS_PINCTRL, DeviceState *),
 };

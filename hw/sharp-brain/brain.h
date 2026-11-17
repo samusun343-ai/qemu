@@ -538,13 +538,23 @@ OBJECT_DECLARE_SIMPLE_TYPE(BrainEdna2MbState, BRAIN_EDNA2_MB)
  * in-band row/col sentinel could not express "unmapped" here.)
  *
  * flags:
- *   BRAIN_KEY_DIRECT - key closes the (row, col) contact
- *   BRAIN_KEY_SYMBOL - key additionally holds the "symbols" (記号)
- *                      modifier contact while down, reproducing the
- *                      blue-legend layer of the real keyboard
+ *   BRAIN_KEY_DIRECT  - key closes the (row, col) contact
+ *   BRAIN_KEY_SYMBOL  - key additionally holds the "symbols" (記号)
+ *                       modifier contact while down, reproducing the
+ *                       blue-legend layer of the real keyboard
+ *   BRAIN_KEY_SHIFT   - key additionally holds the Shift contact
+ *                       while down (used for glyphs that live on the
+ *                       Shift+symbols layer, and for the "_" route)
+ *   BRAIN_KEY_NOSHIFT - while this key is latched, the host Shift
+ *                       keys' own contribution to the Shift contact
+ *                       is suppressed (used by the "shifted" table
+ *                       for glyphs that live on the plain symbols
+ *                       layer although the host key needs Shift)
  */
-#define BRAIN_KEY_DIRECT (1 << 0)
-#define BRAIN_KEY_SYMBOL (1 << 1)
+#define BRAIN_KEY_DIRECT  (1 << 0)
+#define BRAIN_KEY_SYMBOL  (1 << 1)
+#define BRAIN_KEY_SHIFT   (1 << 2)
+#define BRAIN_KEY_NOSHIFT (1 << 3)
 
 typedef struct BrainKeyDef {
     int8_t row;                 /* valid only when flags != 0 */
@@ -555,8 +565,23 @@ typedef struct BrainKeyDef {
 typedef struct BrainKbdLayout {
     const char *name;
     int symbol_row, symbol_col; /* "symbols" modifier contact        */
-    const BrainKeyDef *direct;  /* [KEY_CNT] host keys        */
-    const BrainKeyDef *combo;   /* [KEY_CNT] Ctrl+key combos  */
+    int shift_row, shift_col;   /* Shift contact                     */
+    const BrainKeyDef *direct;  /* [KEY_CNT] host keys (US layout)   */
+    const BrainKeyDef *combo;   /* [KEY_CNT] Ctrl+key combos         */
+    /*
+     * Host-layout variants.  Host keycodes are positional, so keys
+     * whose printed glyph differs between a US and a JIS keyboard
+     * need different chords to produce the glyph printed on them:
+     *   jis_direct  - overrides merged over `direct` for JIS hosts
+     *   jis_shifted - entries consulted for JIS hosts when a host
+     *                 Shift key is held at key-down time
+     *   us_shifted  - same for US hosts (NULL when the plain table
+     *                 plus the passed-through Shift already yields
+     *                 every US shifted glyph)
+     */
+    const BrainKeyDef *jis_direct;
+    const BrainKeyDef *jis_shifted;
+    const BrainKeyDef *us_shifted;
 } BrainKbdLayout;
 
 const BrainKbdLayout *brain_kbd_find_layout(const char *name);
@@ -566,12 +591,48 @@ struct BrainKbdState {
 
     DeviceState *pinctrl;       /* link to the i.MX28 PINCTRL */
     char *layout_name;          /* board layout property */
+    char *host_layout_name;     /* host keyboard layout: "us"/"jis" */
+    bool host_jis;
     const BrainKbdLayout *layout;
+
+    /*
+     * The direct table resolved for the configured host layout
+     * (layout->direct with layout->jis_direct merged over it for
+     * JIS hosts), and the matching "shifted" table consulted when
+     * a host Shift key is held at key-down time (may be NULL).
+     */
+    BrainKeyDef direct_resolved[KEY_CNT];
+    const BrainKeyDef *shifted_tab;
 
     uint32_t row_out;           /* GPIO4 effective output (DOUT&DOE) */
     uint32_t row_doe;           /* GPIO4 output-enable: rows the guest drives */
+    /*
+     * Column drive state for the transposed scan direction: the
+     * Brainux/Linux driver drives the columns (GPIO2_16..21 and
+     * GPIO4_8) as outputs and reads the rows on GPIO4_0..7, the
+     * opposite of the WinCE driver.  Effective output (DOUT&DOE)
+     * and output-enable for bank 2 and for the bank-4 column bit.
+     */
+    uint32_t col2_out, col2_doe;
+    uint32_t col4_out, col4_doe;
     uint64_t pressed;           /* bitmask: bit = row * BRAIN_KBD_COLS + col */
     unsigned int ctrl_held;     /* host Ctrl keys currently down */
+
+    /*
+     * Host modifier state.  The per-key booleans guard against the
+     * autorepeat down events frontends generate for a held key:
+     * without them, holding Ctrl would inflate ctrl_held and a
+     * single key-up would never clear it, making every later key a
+     * combo key.  The Shift contact is driven exclusively through
+     * brain_kbd_sync_shift(): it is closed when a latched entry
+     * forces it (shift_forced > 0) or when a host Shift key is down
+     * and no latched entry suppresses it (shift_suppressed == 0).
+     */
+    bool lctrl_down, rctrl_down;
+    bool lshift_down, rshift_down;
+    unsigned int shift_forced;
+    unsigned int shift_suppressed;
+    bool shift_applied;
 
     /*
      * The mapping applied by each host key's key-down, latched so the
