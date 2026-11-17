@@ -290,7 +290,7 @@ static bool bootrom_parse_sb(void)
 
     uint32_t hdr_end = hdr.header_blocks * 16;
     if (hdr_end < sizeof(hdr) || hdr_end > img_size ||
-        hdr.image_blocks * 16 > img_size) {
+        (uint64_t)hdr.image_blocks * 16 > img_size) {
         qemu_log_mask(LOG_GUEST_ERROR, "bootrom: bad header geometry "
                       "(header=%u blocks, image=%u blocks, media=%u)\n",
                       hdr.header_blocks, hdr.image_blocks, img_size / 16);
@@ -342,11 +342,19 @@ static bool bootrom_parse_sb(void)
         goto fail;
     }
 
-    uint32_t data_off = le32_to_cpu(boot_sect.offset) * 16;
-    uint32_t data_len = le32_to_cpu(boot_sect.length) * 16;
+    /*
+     * The section offset/length are image-controlled block counts:
+     * keep the byte arithmetic in 64 bits.  In 32 bits a large
+     * offset wraps the range check (offset 0x0ffffff0 blocks +
+     * length 0x20 blocks sums to 0x100 bytes) and the copy below
+     * reads gigabytes past the image buffer - reproduced with a
+     * crafted boot image (SIGSEGV at machine reset).
+     */
+    uint64_t data_off = (uint64_t)le32_to_cpu(boot_sect.offset) * 16;
+    uint64_t data_len = (uint64_t)le32_to_cpu(boot_sect.length) * 16;
     if (data_off + data_len > img_size) {
         qemu_log_mask(LOG_GUEST_ERROR, "bootrom: section out of range "
-                      "(off=%u len=%u image=%u)\n",
+                      "(off=%" PRIu64 " len=%" PRIu64 " image=%u)\n",
                       data_off, data_len, img_size);
         goto fail;
     }
@@ -358,13 +366,13 @@ static bool bootrom_parse_sb(void)
      * each starting from IV = digest[0:16]; within the section the CBC
      * chain runs continuously across commands and LOAD payloads.
      */
-    stream_size = 16 + data_len;
+    stream_size = 16 + (uint32_t)data_len;
     stream = g_malloc(stream_size);
 
     BRAIN_LOG(
                   "bootrom: SB image %u blocks, header %u blocks, "
-                  "%u sections, boot section %u (off=%u len=%u), "
-                  "boot tag at +%u%s\n",
+                  "%u sections, boot section %u (off=%" PRIu64
+                  " len=%" PRIu64 "), boot tag at +%u%s\n",
                   hdr.image_blocks, hdr.header_blocks, hdr.section_count,
                   hdr.first_boot_section_id, data_off, data_len, tag_off,
                   hdr.key_count ? ", encrypted" : ", cleartext");
