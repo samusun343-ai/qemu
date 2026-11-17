@@ -753,7 +753,17 @@ static const struct {
     { 0x00, 0x00000000 },   /* PLL0CTRL0 */
     { 0x02, 0x00000000 },   /* PLL1CTRL0 */
     { 0x04, 0x00000000 },   /* PLL2CTRL0 */
-    { 0x05, 0x00000001 },   /* CPU      (div 1) */
+    /*
+     * CPU carries two divider fields: DIV_CPU (bits 5:0, the PLL
+     * path) and DIV_XTAL (bits 25:16, the XTAL path; the kernel's
+     * clk-imx28 registers them as the separate cpu_pll / cpu_xtal
+     * dividers).  Both must be valid: the boot chain never programs
+     * DIV_XTAL (verified by dumping CLKCTRL at the U-Boot prompt in
+     * the Brainux chain), and on silicon the CPU runs from the
+     * 24 MHz XTAL through this divider at power-on, so it resets
+     * to 1 like the PLL-path field.
+     */
+    { 0x05, 0x00010001 },   /* CPU      (DIV_XTAL 1, DIV_CPU 1) */
     { 0x06, 0x00000001 },   /* HBUS     (div 1) */
     { 0x07, 0x00000001 },   /* XBUS     (div 1) */
     { 0x08, 0x00000001 },   /* XTAL     (div 1) */
@@ -763,7 +773,13 @@ static const struct {
     { 0x0c, 0x00000001 },   /* SSP3     (div 1) */
     { 0x0d, 0x00000001 },   /* GPMI     (div 1) */
     { 0x0e, 0x00000001 },   /* SPDIF    (div 1) */
-    { 0x0f, 0x00000001 },   /* EMI      (div 1) */
+    /*
+     * EMI likewise: DIV_EMI (bits 5:0, PLL path) and DIV_XTAL
+     * (bits 11:8, XTAL path; clk-imx28's emi_pll / emi_xtal).
+     * Same reasoning as CPU: untouched by the boot chain, and the
+     * DRAM controller runs from the XTAL path at power-on.
+     */
+    { 0x0f, 0x00000101 },   /* EMI      (DIV_XTAL 1, DIV_EMI 1) */
     { 0x10, 0x00000001 },   /* SAIF0    (div 1) */
     { 0x11, 0x00000001 },   /* SAIF1    (div 1) */
     { 0x12, 0x00000001 },   /* LCDIF    (div 1) */
