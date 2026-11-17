@@ -451,7 +451,19 @@ static bool bootrom_do_call(uint32_t ivt_addr)
                         sizeof(trampoline));
 
     cpu_reset(cs);
-    cpu->env.uncached_cpsr = ARM_CPU_MODE_SVC | CPSR_I | CPSR_F;
+    /*
+     * Set the entry CPSR through cpsr_write(), not by poking
+     * env.uncached_cpsr directly: the AIF bits live in env.daif and
+     * must stay clear of uncached_cpsr, because cpsr_read() ORs the
+     * two together.  Leaving CPSR_I/CPSR_F behind in uncached_cpsr
+     * makes every later CPSR read (guest MRS and the SPSR snapshot
+     * taken on IRQ entry) report interrupts as masked forever,
+     * even though the daif-based acceptance test still delivers
+     * them -- the first Linux tick then returns with I=1 latched
+     * into SPSR and the kernel never unmasks again.
+     */
+    cpsr_write(&cpu->env, ARM_CPU_MODE_SVC | CPSR_I | CPSR_F,
+               CPSR_M | CPSR_AIF, CPSRWriteRaw);
     cpu->env.regs[0] = 0;
     cpu->env.regs[13] = BOOTROM_SP;
     cpu->env.regs[14] = BOOTROM_TRAMPOLINE;
