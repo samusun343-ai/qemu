@@ -38,6 +38,9 @@
 
 #define TIMROT_ROTCTRL        0x00
 #define TIMROT_ROTCOUNT       0x10
+
+#define ROTCTRL_SFTRST        (1u << 31)
+#define ROTCTRL_CLKGATE       (1u << 30)
 #define TIMROT_TIMCTRL(n)     (0x20 + (n) * 0x40)
 #define TIMROT_RUNNING(n)     (0x30 + (n) * 0x40)
 #define TIMROT_FIXED(n)       (0x40 + (n) * 0x40)
@@ -344,6 +347,8 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
                   (unsigned)reg, off, (uint32_t)value);
 
     if (reg == TIMROT_ROTCTRL) {
+        uint32_t old = s->rotctrl;
+
         switch (off) {
         case 0:
             s->rotctrl = value;
@@ -357,6 +362,18 @@ static void timrot_write(void *opaque, hwaddr addr, uint64_t value,
         case 12:
             s->rotctrl ^= value;
             break;
+        }
+        /*
+         * SFTRST rising edge -> the block enters reset and its
+         * clock gates once (the stmp handshake, as in the other
+         * blocks): the mxs timer driver runs stmp_reset_block()
+         * on ROTCTRL at init and polls for CLKGATE reading back
+         * set after asserting SFTRST, so plain storage times the
+         * poll out.  One-shot, so an explicit CLKGATE clear while
+         * SFTRST is still asserted sticks.
+         */
+        if (!(old & ROTCTRL_SFTRST) && (s->rotctrl & ROTCTRL_SFTRST)) {
+            s->rotctrl |= ROTCTRL_CLKGATE;
         }
         return;
     }
