@@ -605,9 +605,11 @@ static void bootrom_patch_eboot(uint8_t *img, uint32_t count)
         /* blob PA -> uncached alias VA */
         stl_le_p(&img[lit_off], blob_pa + 0x60000000);
 
-        /* find and fix the position-dependent final-phase jump */
+        /* find and fix the position-dependent final-phase jump
+         * (never scan past the payload itself) */
         for (uint32_t o = off + ARRAY_SIZE(pattern) * 4;
-             o + ARRAY_SIZE(tail_pattern) * 4 <= off + 0x400;
+             o + ARRAY_SIZE(tail_pattern) * 4 <= off + 0x400 &&
+             o + ARRAY_SIZE(tail_pattern) * 4 <= count;
              o += 4) {
             uint32_t k;
 
@@ -661,9 +663,27 @@ static bool bootrom_run(void)
                           "(tag 0x%02x flags 0x%04x)\n", pos, cmd, flags);
             break;
         case SB_CMD_LOAD:
-            if (addr + count > IMX28_IRAM_SIZE &&
+            /*
+             * The payload must actually be present in the stream:
+             * count is stream-controlled, and nothing stopped a
+             * LOAD from claiming more bytes than remain - the copy
+             * (and the EBOOT fixup scan) then read far past the
+             * decrypted buffer (reproduced with a crafted boot
+             * image: LOAD count 16 MiB in a 32-byte stream ->
+             * SIGSEGV).  The end-address arithmetic is 64-bit for
+             * the same reason.
+             */
+            if (count > bootrom.cmd_size - (pos + 16)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "bootrom: LOAD of %u bytes at +%u exceeds "
+                              "the boot stream (%u bytes)\n",
+                              count, pos, bootrom.cmd_size);
+                return false;
+            }
+            if ((uint64_t)addr + count > IMX28_IRAM_SIZE &&
                 (addr < IMX28_DRAM_BASE ||
-                 addr + count > IMX28_DRAM_BASE + IMX28_DRAM_SIZE)) {
+                 (uint64_t)addr + count >
+                     IMX28_DRAM_BASE + IMX28_DRAM_SIZE)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "bootrom: LOAD to invalid address 0x%08x "
                               "(%u bytes)\n", addr, count);
