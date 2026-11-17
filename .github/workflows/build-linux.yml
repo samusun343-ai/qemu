@@ -21,6 +21,16 @@
 # static archive, and whether its development files are present
 # otherwise decides if the qemu-keymap utility is built, which
 # would make the build depend on the runner image's package set.
+#
+# The second job (build-appimage) builds the same source dynamically
+# with the GTK display enabled and packages it as a single-file
+# AppImage (linuxdeploy + the GTK plugin bundle the runtime
+# libraries), which is the primary distribution for desktop use:
+# it opens a normal window on common Linux distributions.  The
+# static build above remains as the headless / maximum-portability
+# artifact.  QEMU's data files need no -L flag in either package:
+# the executable resolves share/qemu relative to its own location,
+# which also holds inside the AppImage's mounted AppDir.
 
 name: Build Linux (sharp-brain)
 
@@ -153,6 +163,12 @@ jobs:
 
           A microSD card image can be attached as a second drive:
               -drive if=sd,index=1,file=sd.img,format=raw
+
+          Note: this static build is headless (display backends: none
+          and dbus only).  For desktop use with a GTK window, use the
+          AppImage build instead (artifact
+          qemu-system-arm-brain-linux-x86_64-appimage from the same
+          workflow run).
           EOF
           ls -laR "$ART" | head -50
 
@@ -180,4 +196,204 @@ jobs:
             build/meson-logs
             build/config-host.mak
             ninja-build.log
+          if-no-files-found: ignore
+
+  build-appimage:
+    name: qemu-system-arm AppImage with GTK (ubuntu-24.04, x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 python3-pip curl file \
+            libglib2.0-dev libpixman-1-dev libfdt-dev \
+            nettle-dev libgmp-dev zlib1g-dev \
+            libgtk-3-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev
+
+      - name: Install meson and ninja
+        run: |
+          python3 -m pip install --user --break-system-packages \
+            'meson==1.12.1' 'ninja==1.13.2'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download linuxdeploy and the GTK plugin
+        # linuxdeploy ships only as an AppImage; extract it so that no
+        # FUSE is needed on the runner.  The GTK plugin has no releases
+        # and is distributed as a shell script from its repository.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+          cd "$GITHUB_WORKSPACE/tools"
+          curl -fsSL -o linuxdeploy.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy.AppImage
+          ./linuxdeploy.AppImage --appimage-extract > /dev/null
+          mv squashfs-root linuxdeploy
+          curl -fsSL -o linuxdeploy-plugin-gtk \
+            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x linuxdeploy-plugin-gtk
+          ./linuxdeploy/AppRun --version
+
+      - name: Configure (dynamic, GTK, arm-softmmu only)
+        run: |
+          mkdir build-gtk
+          cd build-gtk
+          ../configure \
+            --prefix=/usr \
+            --target-list=arm-softmmu \
+            --disable-werror \
+            --disable-docs \
+            --disable-tools \
+            --disable-guest-agent \
+            --enable-fdt=system \
+            --enable-nettle \
+            --disable-gcrypt \
+            --disable-gnutls \
+            --disable-slirp \
+            --disable-capstone \
+            --enable-gtk \
+            --disable-sdl \
+            --disable-curses \
+            --disable-vte \
+            --disable-spice \
+            --disable-opengl \
+            --disable-virglrenderer \
+            --disable-xen \
+            --disable-tpm \
+            --disable-smartcard \
+            --disable-curl \
+            --disable-libssh \
+            --disable-libnfs \
+            --disable-libusb \
+            --disable-usb-redir \
+            --disable-brlapi \
+            --disable-virtfs \
+            --disable-seccomp \
+            --disable-linux-aio \
+            --disable-linux-io-uring \
+            --disable-zstd \
+            --disable-lzo \
+            --disable-snappy
+
+      - name: Build
+        run: |
+          cd build-gtk
+          set -o pipefail
+          ninja qemu-system-arm 2>&1 | tee "$GITHUB_WORKSPACE/ninja-build-gtk.log"
+
+      - name: Surface build errors as annotations
+        if: failure()
+        run: |
+          LOG="$GITHUB_WORKSPACE/ninja-build-gtk.log"
+          if [ -f "$LOG" ]; then
+            grep -E 'error:|FAILED|undefined reference' "$LOG" | head -20 |
+            while IFS= read -r line; do
+              echo "::error::$(printf '%s' "$line" | tr -d '%' | cut -c1-240)"
+            done
+          fi
+          true
+
+      - name: Install into the AppDir
+        run: |
+          cd build-gtk
+          DESTDIR="$GITHUB_WORKSPACE/AppDir" ninja install
+          ls -la "$GITHUB_WORKSPACE/AppDir/usr/bin"
+          ls "$GITHUB_WORKSPACE/AppDir/usr/share/qemu" | head
+
+      - name: Package the AppImage
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          chmod -R a+rX AppDir
+          export PATH="$GITHUB_WORKSPACE/tools:$PATH"
+          DEPLOY_GTK_VERSION=3 \
+          OUTPUT="$GITHUB_WORKSPACE/qemu-system-arm-brain-linux-x86_64.AppImage" \
+            tools/linuxdeploy/AppRun \
+              --appdir AppDir \
+              --desktop-file .github/workflows/qemu-brain.desktop \
+              --plugin gtk \
+              --output appimage
+          ls -la qemu-system-arm-brain-linux-x86_64.AppImage
+
+      - name: Sanity-check the AppImage
+        # Extract (no FUSE needed) and run the packaged AppRun in an
+        # empty environment: the GTK display backend must be present
+        # and the Brain machines must be listed.
+        run: |
+          rm -rf /tmp/appimage-check
+          mkdir -p /tmp/appimage-check
+          cd /tmp/appimage-check
+          "$GITHUB_WORKSPACE/qemu-system-arm-brain-linux-x86_64.AppImage" \
+            --appimage-extract > /dev/null
+          env -i PATH=/usr/bin:/bin HOME=/tmp squashfs-root/AppRun --version
+          env -i PATH=/usr/bin:/bin HOME=/tmp squashfs-root/AppRun \
+            -display help | grep -x gtk
+          env -i PATH=/usr/bin:/bin HOME=/tmp squashfs-root/AppRun \
+            -M help | grep -E 'pw-sh6|pw-aj2|pw-aj1|sharp-brain'
+
+      - name: Package artifact (AppImage + README)
+        run: |
+          ART="$GITHUB_WORKSPACE/artifact-appimage"
+          mkdir -p "$ART"
+          cp qemu-system-arm-brain-linux-x86_64.AppImage "$ART/"
+          cat > "$ART/README.txt" <<'EOF'
+          SHARP Brain QEMU - qemu-system-arm (Linux x86_64 AppImage, GTK GUI)
+
+          Machines: pw-sh6 (alias: sharp-brain), pw-aj2, pw-aj1
+
+          This is a single-file AppImage: qemu-system-arm with the GTK
+          display, with all runtime libraries bundled.  It runs on
+          common Linux distributions without installing anything.
+          Just make it executable:
+
+            chmod +x qemu-system-arm-brain-linux-x86_64.AppImage
+
+          You also need a SHARP Brain eMMC image file (emmc.img),
+          which is NOT included in this package.
+
+          Start the PW-SH6 with the eMMC image attached read-only
+          (snapshot=on discards guest writes; the image file is
+          never modified):
+
+            ./qemu-system-arm-brain-linux-x86_64.AppImage -M pw-sh6 \
+              -drive if=sd,index=0,file=emmc.img,format=raw,snapshot=on
+
+          A GTK window opens.  The first boot shows the first-run
+          setup; complete it with the keyboard (n, Down, Down, Enter,
+          Enter) to reach the home launcher.  The mouse works as the
+          touch pen, including the sidebar strip on the right edge.
+
+          A microSD card image can be attached as a second drive:
+              -drive if=sd,index=1,file=sd.img,format=raw
+
+          Drop "snapshot=on" to let the guest write to the image
+          (keep a backup of the pristine image).  Sound is available
+          through ALSA or PulseAudio/PipeWire on the host.
+
+          If FUSE is unavailable on your system, extract and run:
+            ./qemu-system-arm-brain-linux-x86_64.AppImage --appimage-extract
+            ./squashfs-root/AppRun -M pw-sh6 \
+              -drive if=sd,index=0,file=emmc.img,format=raw,snapshot=on
+          EOF
+          ls -la "$ART"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-arm-brain-linux-x86_64-appimage
+          path: artifact-appimage
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-appimage
+          path: |
+            build-gtk/meson-logs
+            build-gtk/config-host.mak
+            ninja-build-gtk.log
           if-no-files-found: ignore

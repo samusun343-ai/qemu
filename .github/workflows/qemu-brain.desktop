@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=QEMU SHARP Brain
+GenericName=System Emulator
+Comment=QEMU system emulator with SHARP Brain machines (PW-SH6 / PW-AJ2 / PW-AJ1)
+Exec=qemu-system-arm
+Icon=qemu
+Terminal=false
+Categories=Emulator;System;
+Keywords=emulator;virtualization;sharp;brain;wince;
