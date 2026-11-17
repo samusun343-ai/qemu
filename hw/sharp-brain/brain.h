@@ -402,6 +402,13 @@ struct MxsI2cState {
      * data descriptor before the synchronous transfer executes */
     bool run_pending;
 
+    /* CPU (PIO) transfer state: a transaction opened by a CTRL0.RUN
+     * command stays open across commands until one carries
+     * POST_SEND_STOP (or the block is reset), like the hardware's
+     * START/STOP sequencing */
+    bool pio_open;
+    bool pio_recv;
+
     /* DMA combined-read state: an address-for-read payload arms
      * the slave; the following WRITE data descriptor clocks the
      * bytes in (see mxs_i2c_dma_data in i2c.c) */

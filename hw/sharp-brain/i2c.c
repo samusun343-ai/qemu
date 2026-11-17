@@ -33,10 +33,10 @@
 
 #define HW_I2C_CTRL0       0x000
 #define HW_I2C_TIMING0     0x010
-#define HW_I2C_CTRL1       0x020
-#define HW_I2C_STAT        0x030
-#define HW_I2C_TIMING1     0x040
-#define HW_I2C_TIMING2     0x050
+#define HW_I2C_TIMING1     0x020
+#define HW_I2C_TIMING2     0x030
+#define HW_I2C_CTRL1       0x040
+#define HW_I2C_STAT        0x050
 #define HW_I2C_QUEUECTRL   0x060
 #define HW_I2C_QUEUEEND    0x070
 #define HW_I2C_QUEUECMD    0x080
@@ -49,6 +49,8 @@
 #define BM_CTRL0_PREACK      (1u << 27)
 #define BM_CTRL0_ACKNOWLEDGE (1u << 26)
 #define BM_CTRL0_NAK_ON_LAST (1u << 25)
+#define BM_CTRL0_POST_SEND_STOP (1u << 20)
+#define BM_CTRL0_PRE_SEND_START (1u << 19)
 #define BM_CTRL0_MASTER_MODE (1u << 17)
 #define BM_CTRL0_DIRECTION   (1u << 16)   /* mirrors the addr R/W bit */
 #define BM_CTRL0_XFER_COUNT  0x0000ffffu
@@ -72,31 +74,58 @@ static void i2c_update_irq(MxsI2cState *s)
     qemu_set_irq(s->irq, !!(en & st));
 }
 
-/* DATA0-3 hold the transfer bytes MSB-first, four per register */
+/* STAT carries the transfer event bits; the IRQ subset of them is
+ * mirrored into CTRL1's low bits, where polling guests look for it */
+static void i2c_raise_stat(MxsI2cState *s, uint32_t bits)
+{
+    s->stat |= bits;
+    s->ctrl1 |= bits & BM_CTRL1_IRQ;
+}
+
+/*
+ * DATA0-3 are the CPU-side transfer FIFO: the first byte of a
+ * transfer sits in the low byte of DATA0, the next in bits 15:8,
+ * and so on - the order the Linux i2c-mxs PIO path builds transmit
+ * words in and drains receive words from.  (The DMA path does not
+ * use these helpers; it streams through guest memory instead.)
+ */
 static void i2c_data_pack(MxsI2cState *s, const uint8_t *buf, uint32_t len)
 {
     for (uint32_t i = 0; i < len; i++) {
-        s->data[i / 4] |= buf[i] << (24 - 8 * (i % 4));
+        uint32_t shift = 8 * (i % 4);
+
+        s->data[i / 4] &= ~(0xffu << shift);
+        s->data[i / 4] |= (uint32_t)buf[i] << shift;
     }
 }
 
 static void i2c_data_unpack(MxsI2cState *s, uint8_t *buf, uint32_t len)
 {
     for (uint32_t i = 0; i < len; i++) {
-        buf[i] = (s->data[i / 4] >> (24 - 8 * (i % 4))) & 0xff;
+        buf[i] = (s->data[i / 4] >> (8 * (i % 4))) & 0xff;
     }
 }
 
 static void i2c_run(MxsI2cState *s)
 {
     uint32_t count = s->ctrl0 & BM_CTRL0_XFER_COUNT;
-    /* the transfer direction is the R/W bit of the address byte
-     * itself (the first byte of the data stream), exactly as on the
-     * wire; the WinCE DDK's DMA descriptors confirm this - their
-     * CTRL0 images set the bit our old header called DIRECTION on
-     * *send* phases, so branch on the address byte, not on CTRL0 */
-    bool read = (s->data[0] >> 24) & 1;
+    /*
+     * CPU (PIO) command execution.  CTRL0.DIRECTION selects the
+     * phase: the Linux i2c-mxs PIO path sets it on SELECT and WRITE
+     * commands and clears it on the READ command.  The first byte
+     * of the DATA FIFO stream is the 8-bit address byte on the wire
+     * (i2c_8bit_addr_from_msg()); QEMU's i2c core matches slaves by
+     * 7-bit address, so shift it down.  A command with
+     * PRE_SEND_START (or with no transaction open) begins a new
+     * transaction; a direction change on an open transaction is a
+     * repeated START; POST_SEND_STOP ends the transaction.  The
+     * WinCE DDK never uses this path - it streams through APBX DMA
+     * (mxs_i2c_dma_data below), whose descriptors carry the same
+     * CTRL0 images with the data phase in guest memory.
+     */
+    bool read = !(s->ctrl0 & BM_CTRL0_DIRECTION);
     uint8_t buf[16];
+    bool fresh = false;
     int ret = 0;
 
     s->run_pending = false;
@@ -104,60 +133,65 @@ static void i2c_run(MxsI2cState *s)
     if (!(s->ctrl0 & BM_CTRL0_MASTER_MODE) || count == 0) {
         goto done;
     }
+    if (count > sizeof(buf)) {
+        count = sizeof(buf);
+    }
+    i2c_data_unpack(s, buf, count);
 
-    if (read) {
-        if (count > sizeof(buf)) {
-            count = sizeof(buf);
+    if (!s->pio_open || (s->ctrl0 & BM_CTRL0_PRE_SEND_START)) {
+        if (s->pio_open) {
+            i2c_end_transfer(s->bus);
+            s->pio_open = false;
         }
-        /*
-         * Master-mode address: the first DATA byte is the 8-bit
-         * address byte on the wire (Linux i2c-mxs puts
-         * i2c_8bit_addr_from_msg() first into the data stream;
-         * CTRL1.SLAVE_ADDRESS_BYTE is the address this block
-         * responds to in *slave* mode, not the master address).
-         * QEMU's i2c core matches slaves by 7-bit address (all
-         * in-tree masters pass addr >> 1), so shift it down here.
-         * The old code took the address from CTRL1 and passed the
-         * 8-bit byte straight through, so no slave could ever
-         * match (masked only because no slave is attached yet).
-         */
-        ret = i2c_start_recv(s->bus, (s->data[0] >> 25) & 0x7f);
-        if (ret < 0) {
-            s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
+        ret = read ? i2c_start_recv(s->bus, buf[0] >> 1)
+                   : i2c_start_send(s->bus, buf[0] >> 1);
+        if (ret != 0) {
+            /* QEMU's core returns 1 when no slave matches the
+             * address: that is the hardware's address NAK */
+            i2c_raise_stat(s, BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY);
             goto done;
         }
+        s->pio_open = true;
+        s->pio_recv = read;
+        fresh = true;
+    } else if (read != s->pio_recv) {
+        /* repeated START: switch direction on the open transaction */
+        ret = read ? i2c_start_recv(s->bus, buf[0] >> 1)
+                   : i2c_start_send(s->bus, buf[0] >> 1);
+        if (ret != 0) {
+            i2c_raise_stat(s, BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY);
+            i2c_end_transfer(s->bus);
+            s->pio_open = false;
+            goto done;
+        }
+        s->pio_recv = read;
+        fresh = true;
+    }
+
+    if (read) {
         for (uint32_t i = 0; i < count; i++) {
             buf[i] = i2c_recv(s->bus);
         }
-        i2c_end_transfer(s->bus);
-        /* scatter the received bytes over DATA0..3 (MSB first) */
+        /* the received bytes replace the FIFO contents */
         i2c_data_pack(s, buf, count);
     } else {
-        /* gather transmit bytes from DATA0..3 */
-        if (count > sizeof(buf)) {
-            count = sizeof(buf);
-        }
-        i2c_data_unpack(s, buf, count);
-        if (count == 0) {
-            goto done;
-        }
-        /* buf[0] is the 8-bit address byte; QEMU matches 7-bit */
-        ret = i2c_start_send(s->bus, buf[0] >> 1);
-        if (ret < 0) {
-            s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
-            goto done;
-        }
-        for (uint32_t i = 1; i < count; i++) {
+        /* on a fresh start buf[0] was the address byte, consumed by
+         * the start above; continuation commands carry payload only */
+        for (uint32_t i = fresh ? 1 : 0; i < count; i++) {
             if (i2c_send(s->bus, buf[i]) < 0) {
-                s->stat |= BM_STAT_GOT_A_NAK;
+                i2c_raise_stat(s, BM_STAT_GOT_A_NAK);
                 break;
             }
         }
+    }
+
+    if (s->ctrl0 & BM_CTRL0_POST_SEND_STOP) {
         i2c_end_transfer(s->bus);
+        s->pio_open = false;
     }
 
 done:
-    s->stat |= BM_STAT_DATA_ENGINE_CMPLT_IRQ_SUMMARY;
+    i2c_raise_stat(s, BM_STAT_DATA_ENGINE_CMPLT_IRQ_SUMMARY);
     s->ctrl0 &= ~BM_CTRL0_RUN;
     i2c_update_irq(s);
 }
@@ -340,13 +374,13 @@ void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
             s->dma_read_armed = true;
             goto done;
         }
-        if (i2c_start_send(s->bus, buf[0] >> 1) < 0) {
-            s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
+        if (i2c_start_send(s->bus, buf[0] >> 1) != 0) {
+            i2c_raise_stat(s, BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY);
             goto done;
         }
         for (uint32_t i = 1; i < len; i++) {
             if (i2c_send(s->bus, buf[i]) < 0) {
-                s->stat |= BM_STAT_GOT_A_NAK;
+                i2c_raise_stat(s, BM_STAT_GOT_A_NAK);
                 break;
             }
         }
@@ -357,8 +391,8 @@ void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
         }
         memset(buf, 0, sizeof(buf));
         if (s->dma_read_armed) {
-            if (i2c_start_recv(s->bus, s->dma_read_addr) < 0) {
-                s->stat |= BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY;
+            if (i2c_start_recv(s->bus, s->dma_read_addr) != 0) {
+                i2c_raise_stat(s, BM_STAT_NO_SLAVE_ACK_IRQ_SUMMARY);
             } else {
                 for (uint32_t i = 0; i < count; i++) {
                     buf[i] = i2c_recv(s->bus);
@@ -372,7 +406,7 @@ void mxs_i2c_dma_data(MxsI2cState *s, bool to_device,
     }
 
 done:
-    s->stat |= BM_STAT_DATA_ENGINE_CMPLT_IRQ_SUMMARY;
+    i2c_raise_stat(s, BM_STAT_DATA_ENGINE_CMPLT_IRQ_SUMMARY);
     i2c_update_irq(s);
 }
 
@@ -397,6 +431,8 @@ static void i2c_reset(DeviceState *dev)
     s->queuectrl = s->queueend = s->queuecmd = s->queuedata = 0;
     memset(s->data, 0, sizeof(s->data));
     s->run_pending = false;
+    s->pio_open = false;
+    s->pio_recv = false;
     s->dma_read_addr = 0;
     s->dma_read_armed = false;
     qemu_set_irq(s->irq, 0);
