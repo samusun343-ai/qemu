@@ -467,7 +467,16 @@ static void timrot_reset(DeviceState *dev)
 {
     MxsTimrotState *s = MXS_TIMROT(dev);
 
-    s->rotctrl = 0;
+    /*
+     * HW_TIMROT_ROTCTRL power-on value (IMX28RM Rev. 2, ch. 23
+     * memory map): SFTRST and CLKGATE set, and the PRESENT bits
+     * (ROTARY/TIM3/TIM2/TIM1/TIM0, bits 29-25) read one.  The
+     * timers themselves are not gated on ROTCTRL in this model,
+     * and the guest reset dances work from this state exactly as
+     * from zero (the SFTRST-rising-edge hook in timrot_write only
+     * fires on a 0->1 transition the guest performs itself).
+     */
+    s->rotctrl = 0xfe000000;
     s->rotcount = 0;
     memset(s->timctrl, 0, sizeof(s->timctrl));
     memset(s->fixed_count, 0, sizeof(s->fixed_count));
