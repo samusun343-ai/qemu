@@ -29,6 +29,67 @@ data (LCD panel, keyboard matrix, touch wiring).
 `if=sd,index=0` is the on-board eMMC (SSP0, 8-bit bus, TYPE_EMMC),
 `index=1` is the microSD slot (SSP1, 4-bit bus).
 
+## Prebuilt binaries (CI artifacts and releases)
+
+The `Build Linux (sharp-brain)` workflow
+(`.github/workflows/build-linux.yml`) builds two Linux x86_64 packages
+on every push to `brain`:
+
+* `qemu-system-arm-brain-linux-x86_64-appimage` — a single-file
+  AppImage with the GTK display (the primary desktop distribution),
+  and
+* `qemu-system-arm-brain-linux-x86_64` — a statically linked headless
+  build (`bin/qemu-system-arm` plus the `share/qemu` data files).
+
+Tagged versions (`v*`) are additionally published as GitHub Releases
+by `.github/workflows/release.yml`, with the AppImage, a tarball of
+the static build, and a `SHA256SUMS` file attached. Prefer the
+Release downloads: they have stable URLs (see below).
+
+### Why a browser on Windows may call the download "dangerous"
+
+CI *artifact* downloads commonly trigger a warning such as "This
+file is not commonly downloaded" / "Dangerous download blocked" in
+Chrome, or a similar reputation warning in Edge (SmartScreen). This
+is a **reputation** warning, not a malware detection:
+
+* The binaries are unsigned, and neither Chrome's Safe Browsing nor
+  Microsoft SmartScreen has an established reputation for them.
+* Every CI build produces a brand-new file with a new SHA-256, so
+  any reputation earlier downloads earned never carries over.
+* Actions artifact downloads are served from per-run signed Azure
+  Blob Storage URLs that expire, not from a canonical location.
+
+Release downloads (stable `github.com` URLs, unchanged file bytes)
+are what reputation systems can accumulate history for, which is
+why tagged releases are the canonical way to obtain a binary. The
+warning can still appear for a brand-new release; it fades as the
+file accumulates downloads.
+
+### Verifying a download
+
+Compare the SHA-256 of the downloaded file against the value
+published next to it:
+
+* Release: the `SHA256SUMS` file attached to the same release.
+* CI artifact: the run's artifact list shows each artifact's
+  SHA-256 digest.
+
+    sha256sum qemu-system-arm-brain-linux-x86_64.AppImage        # Linux
+    certutil -hashfile qemu-system-arm-brain-linux-x86_64.AppImage SHA256
+
+If the hashes match, the file is bit-identical to what CI built
+from the public source in this repository.
+
+### Keeping a download the browser warned about
+
+If you downloaded from this repository's Releases or Actions page
+and verified the hash as above, you can keep the file: in Chrome
+open the downloads list (Ctrl+J) and choose "Keep" for the item;
+in Edge choose "Keep", or "Show more" → "Keep anyway". (These are
+Linux executables — Windows cannot run them; the warning appears
+at download time regardless.)
+
 ## i.MX28 boot chain (reverse engineered from the PW-AJ2 eMMC dump)
 
 The boot flow was reconstructed by analysing the eMMC image shipped at
