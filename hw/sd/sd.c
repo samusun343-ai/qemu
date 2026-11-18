@@ -359,6 +359,17 @@ static enum SDCardModes sd_mode(SDState *sd)
     case sd_receivingdata_state:
     case sd_programming_state:
     case sd_disconnect_state:
+    case sd_sleep_state:
+        /*
+         * Sleep is a substate of Standby (entered and left with
+         * CMD5): the dispatcher rejects every command but CMD0
+         * while the card sleeps, so this classification only feeds
+         * tracing and mode checks the sleep guard makes
+         * unreachable.  Leaving the state out here made
+         * sd_normal_command's trace evaluation abort the emulator
+         * when a host re-initialised a sleeping eMMC with CMD0
+         * (e.g. Linux MMC resume after suspend).
+         */
         return sd_data_transfer_mode;
     default:
         g_assert_not_reached();
