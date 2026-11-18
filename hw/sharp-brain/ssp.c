@@ -627,12 +627,13 @@ static void mxs_ssp_reset(DeviceState *dev)
     s->ctrl0 = 0;
     s->cmd0 = 0;
     s->cmd1 = 0;
-    s->xfer_size = 0;
+    /* power-on values (IMX28RM Rev. 2, ch. 17 memory map) */
+    s->xfer_size = 1;          /* HW_SSP_XFER_SIZE resets to 1 */
     s->block_size = 0;
     s->compref = 0;
     s->compmask = 0;
     s->timing = 0;
-    s->ctrl1 = 0;
+    s->ctrl1 = 0x00000080;     /* HW_SSP_CTRL1 reset value */
     s->status = 0;
     s->ddr_ctrl = 0;
     s->dll_ctrl = 0;
@@ -641,7 +642,7 @@ static void mxs_ssp_reset(DeviceState *dev)
     s->data_remaining = 0;
     s->data_dir_read = false;
     s->stage_pos = s->stage_len = 0;
-    s->version = 0x04000000;    /* imx28 SSP v4.0 magic-ish */
+    s->version = 0x04000000;    /* HW_SSP_VERSION (IMX28RM ch. 17) */
 }
 
 static void mxs_ssp_init(Object *obj)
