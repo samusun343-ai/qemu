@@ -1,0 +1,84 @@
+# Publish a GitHub Release from the Linux builds when a version tag
+# (v*) is pushed.
+#
+# The build steps are NOT duplicated here: this workflow calls
+# build-linux.yml as a reusable workflow, then collects the two
+# artifacts that workflow uploads into this same run and attaches
+# them to a GitHub Release for the tag, together with a SHA256SUMS
+# file.
+#
+# Why releases, when CI artifacts already exist: artifact downloads
+# are served through per-run signed Azure Blob Storage URLs that
+# expire, and every CI build produces files with fresh SHA-256
+# hashes, so browser download protection (Chrome Safe Browsing,
+# Microsoft SmartScreen) can never accumulate reputation for them
+# and keeps warning that the download is uncommon / dangerous.
+# Release assets instead live at stable github.com URLs with
+# unchanged bytes, which is what reputation systems can build
+# history on, and users get one canonical download location.
+# The binaries remain unsigned; see the "Prebuilt binaries" section
+# of hw/sharp-brain/README.md for what that means in practice.
+#
+# This workflow is inert until a v* tag is pushed.  Note that this
+# repository is a QEMU fork: do not push upstream QEMU tags (also
+# v*) to this remote, or they would trigger a release build too.
+
+name: Release (sharp-brain)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux packages (build-linux.yml)
+    uses: ./.github/workflows/build-linux.yml
+    permissions:
+      contents: read
+
+  release:
+    name: Publish the GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the build artifacts from this run
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-in
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          cp "dist-in/qemu-system-arm-brain-linux-x86_64-appimage/qemu-system-arm-brain-linux-x86_64.AppImage" \
+             release-assets/
+          tar -czf release-assets/qemu-system-arm-brain-linux-x86_64.tar.gz \
+            -C dist-in qemu-system-arm-brain-linux-x86_64
+          cd release-assets
+          sha256sum qemu-system-arm-brain-linux-x86_64.AppImage \
+                    qemu-system-arm-brain-linux-x86_64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          ls -la
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "SHARP Brain QEMU $tag" \
+              --generate-notes \
+              release-assets/*
+          fi

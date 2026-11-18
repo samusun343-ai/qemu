@@ -36,6 +36,8 @@ name: Build Linux (sharp-brain)
 
 on:
   workflow_dispatch:
+  # release.yml calls this workflow to build the packages it publishes.
+  workflow_call:
   push:
     branches: [brain]
 
