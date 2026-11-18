@@ -487,6 +487,7 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
     case DMA_REG_CHANNEL_CTRL:
     case DMA_REG_CHANNEL_CTRL + 4:
     case DMA_REG_CHANNEL_CTRL + 8:
+    case DMA_REG_CHANNEL_CTRL + 12:
         off = addr & 0xf;
         if (off == 0) {
             s->channel_ctrl = value;
@@ -494,6 +495,17 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
             s->channel_ctrl |= value;
         } else if (off == 8) {
             s->channel_ctrl &= ~value;
+        } else {
+            /* TOG: a RESET_CHANNEL bit that toggles on takes effect */
+            uint32_t risen = ~s->channel_ctrl & (uint32_t)value;
+
+            s->channel_ctrl ^= value;
+            for (int i = 0; i < MXS_DMA_CHANNELS; i++) {
+                if (risen & (1u << (i + 16))) {
+                    mxs_dma_reset_channel(s, i);
+                }
+            }
+            return;
         }
         if (off != 8) {
             /* bits written set in RESET_CHANNEL (16 + ch) take effect */
