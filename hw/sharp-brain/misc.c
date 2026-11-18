@@ -740,19 +740,30 @@ static const MemoryRegionOps mxs_misc_ops = {
 };
 
 /*
- * CLKCTRL reset defaults.  The power-on values are not documented in
- * the public datasheet; these follow the "boot ROM + stage0 have run"
- * state: every clock divider field is valid (non-zero) so clock-rate
- * computations in the boot loader never divide by zero.  Registers
- * that stage0/EBOOT program themselves are overwritten at runtime.
+ * CLKCTRL reset defaults, from the HW_CLKCTRL memory map in the
+ * i.MX28 Reference Manual (IMX28RM Rev. 2, ch. 10).  Most of
+ * these registers are divider/gate fields the boot chain either
+ * reprograms or reads to derive clock rates, so the power-on
+ * values matter: a zero divider field is a divide-by-zero on real
+ * boot paths.  Note the read path masks bits 31:28 (SFTRST/
+ * CLKGATE/BUSY class) on non-FRAC registers, so the CLKGATE bits
+ * in several reset values are stored truthfully but do not change
+ * what guests read.
+ *
+ * Two entries deliberately keep post-boot-ROM state instead of
+ * the power-on value: FRAC0/FRAC1 (see their comment below).
+ * HW_CLKCTRL_RESET is also not listed: it powers on as 0x12,
+ * whose bit 1 is the chip-reset trigger this model acts on in
+ * the write path, so storing the power-on value would reset the
+ * chip on the first unrelated write to the register.
  */
 static const struct {
     uint32_t idx;
     uint32_t val;
 } clkctrl_reset[] = {
     { 0x00, 0x00000000 },   /* PLL0CTRL0 */
-    { 0x02, 0x00000000 },   /* PLL1CTRL0 */
-    { 0x04, 0x00000000 },   /* PLL2CTRL0 */
+    { 0x02, 0x80000000 },   /* PLL1CTRL0 */
+    { 0x04, 0x80000000 },   /* PLL2CTRL0 */
     /*
      * CPU carries two divider fields: DIV_CPU (bits 5:0, the PLL
      * path) and DIV_XTAL (bits 25:16, the XTAL path; the kernel's
@@ -765,28 +776,28 @@ static const struct {
      */
     { 0x05, 0x00010001 },   /* CPU      (DIV_XTAL 1, DIV_CPU 1) */
     { 0x06, 0x00000001 },   /* HBUS     (div 1) */
-    { 0x07, 0x00000001 },   /* XBUS     (div 1) */
-    { 0x08, 0x00000001 },   /* XTAL     (div 1) */
-    { 0x09, 0x00000001 },   /* SSP0     (div 1) */
-    { 0x0a, 0x00000001 },   /* SSP1     (div 1) */
-    { 0x0b, 0x00000001 },   /* SSP2     (div 1) */
-    { 0x0c, 0x00000001 },   /* SSP3     (div 1) */
-    { 0x0d, 0x00000001 },   /* GPMI     (div 1) */
-    { 0x0e, 0x00000001 },   /* SPDIF    (div 1) */
+    { 0x07, 0x00000100 },   /* XBUS     (DIV=1 at bits 9:8) */
+    { 0x08, 0x60000001 },   /* XTAL     (PWM_CLK24M gated, DIV_UART 1) */
+    { 0x09, 0x80000001 },   /* SSP0     (CLKGATE, div 1) */
+    { 0x0a, 0x80000001 },   /* SSP1     (CLKGATE, div 1) */
+    { 0x0b, 0x80000001 },   /* SSP2     (CLKGATE, div 1) */
+    { 0x0c, 0x80000001 },   /* SSP3     (CLKGATE, div 1) */
+    { 0x0d, 0x80000001 },   /* GPMI     (CLKGATE, div 1) */
+    { 0x0e, 0x80000000 },   /* SPDIF    (CLKGATE) */
     /*
      * EMI likewise: DIV_EMI (bits 5:0, PLL path) and DIV_XTAL
      * (bits 11:8, XTAL path; clk-imx28's emi_pll / emi_xtal).
      * Same reasoning as CPU: untouched by the boot chain, and the
      * DRAM controller runs from the XTAL path at power-on.
      */
-    { 0x0f, 0x00000101 },   /* EMI      (DIV_XTAL 1, DIV_EMI 1) */
-    { 0x10, 0x00000001 },   /* SAIF0    (div 1) */
-    { 0x11, 0x00000001 },   /* SAIF1    (div 1) */
-    { 0x12, 0x00000001 },   /* LCDIF    (div 1) */
-    { 0x13, 0x00000001 },   /* ETM      (div 1) */
-    { 0x14, 0x00000001 },   /* ENET     (div 1) */
-    { 0x15, 0x00000001 },   /* HSADC    (div 1) */
-    { 0x16, 0x00000001 },   /* FLEXCAN  (div 1) */
+    { 0x0f, 0x80000101 },   /* EMI      (CLKGATE, DIV_XTAL 1, DIV_EMI 1) */
+    { 0x10, 0x80000001 },   /* SAIF0    (CLKGATE, div 1) */
+    { 0x11, 0x80000001 },   /* SAIF1    (CLKGATE, div 1) */
+    { 0x12, 0x80000001 },   /* LCDIF    (CLKGATE, div 1) */
+    { 0x13, 0x80000001 },   /* ETM      (CLKGATE, div 1) */
+    { 0x14, 0xe0100000 },   /* ENET */
+    { 0x15, 0x00000000 },   /* HSADC */
+    { 0x16, 0x78000000 },   /* FLEXCAN */
     /*
      * FRAC0/FRAC1: the boot ROM programs every fractional divider to
      * 18, the pass-through setting (ref clock = 480 MHz x 18/18).
@@ -794,10 +805,15 @@ static const struct {
      * that derives clock rates from the FRAC fields (e.g. U-Boot's
      * mxs clock code computing the IO clock for the SSPs) divides by
      * the field value, so a reset value of 0 is a divide-by-zero on
-     * real boot paths, not a cosmetic gap.
+     * real boot paths, not a cosmetic gap.  (The RM power-on value
+     * additionally has each divider's CLKGATE bit set - 0x92 bytes;
+     * the model keeps the post-boot-ROM ungated state the boot
+     * chain was verified against.)
      */
     { 0x1b, 0x12121212 },   /* FRAC0: CPU/EMI/IO1/IO0 frac 18 */
     { 0x1c, 0x12121212 },   /* FRAC1: PIX/HSADC/GPMI frac 18 */
+    { 0x1d, 0x004483ff },   /* CLKSEQ   (bypass state) */
+    { 0x20, 0x0c020000 },   /* VERSION */
 };
 
 static void mxs_misc_reset(DeviceState *dev)
