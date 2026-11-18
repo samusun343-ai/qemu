@@ -627,7 +627,8 @@ static uint64_t lcdif_read(void *opaque, hwaddr addr, unsigned size)
     case HW_LCDIF_TIMING:
         return s->timing;
     case HW_LCDIF_VERSION:
-        return 0x010000;
+        /* IMX28RM Rev. 2, ch. 33 memory map: 0x04000000 */
+        return 0x04000000;
     default:
         if (reg >= HW_LCDIF_VDCTRL(0) && reg < HW_LCDIF_VDCTRL(4)) {
             return s->vdctrl[(reg - HW_LCDIF_VDCTRL(0)) / 0x10];
