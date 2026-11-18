@@ -126,9 +126,15 @@ static inline MxsMiscState *MISC_OF(void *obj)
 #define PXP_STAT_NEXT_IRQ    (1u << 3)
 #define PXP_NEXT_ENABLED     (1u << 0)
 
-/* POWER_STS bits (i.MX28) */
+/* POWER_STS bits (i.MX28; IMX28RM Rev. 2, section 11.12.13) */
 #define POWER_STS_PWRUP_SOURCE_5V    (0x20u << 24)
-#define POWER_STS_PSWITCH_HIGH       (0x2u << 20)
+/*
+ * PSWITCH is a two-bit comparator readout (bits 21:20): the LSB is
+ * high above 0.8 V, the MSB above 1.75 V.  A pin at full level
+ * reads 0b11; the model originally set only the MSB (0b10), a
+ * state the comparators cannot produce.
+ */
+#define POWER_STS_PSWITCH_HIGH       (0x3u << 20)
 #define POWER_STS_DC_OK              (1u << 9)
 #define POWER_STS_VDD5V_GT_VDDIO     (1u << 5)
 
@@ -816,6 +822,37 @@ static const struct {
     { 0x20, 0x0c020000 },   /* VERSION */
 };
 
+/*
+ * POWER reset defaults, from the HW_POWER memory map (IMX28RM
+ * Rev. 2, ch. 11).  The block is plain storage in this model apart
+ * from the STS/BATTMONITOR read fixups, which are ORed on top of
+ * the stored values below (STS stores its power-on 0x200, i.e.
+ * DC_OK, and BATTMONITOR its 0xa00 status bits; the BATTVAL field
+ * itself is driven by the read fixup).
+ */
+static const struct {
+    uint32_t idx;
+    uint32_t val;
+} power_reset[] = {
+    { 0x00, 0x00010024 },   /* CTRL */
+    { 0x01, 0x20100490 },   /* 5VCTRL */
+    { 0x03, 0x00010000 },   /* CHARGE */
+    { 0x04, 0x00320710 },   /* VDDDCTRL */
+    { 0x05, 0x0000270c },   /* VDDACTRL */
+    { 0x06, 0x00002406 },   /* VDDIOCTRL */
+    { 0x07, 0x00000230 },   /* VDDMEMCTRL */
+    { 0x08, 0x00000018 },   /* DCDC4P2 */
+    { 0x0a, 0x00000c5f },   /* DCLIMITS */
+    { 0x0b, 0x00000021 },   /* LOOPCTRL */
+    { 0x0c, 0x00000200 },   /* STS (stored base; read adds status) */
+    { 0x0e, 0x00000a00 },   /* BATTMONITOR (stored base) */
+    { 0x12, 0x00000080 },   /* THERMAL */
+    { 0x13, 0x0000000e },   /* USB1CTRL */
+    { 0x15, 0x04000000 },   /* VERSION */
+    { 0x16, 0x84000400 },   /* ANACLKCTRL */
+};
+
+
 static void mxs_misc_reset(DeviceState *dev)
 {
     MxsMiscState *s = MISC_OF(dev);
@@ -825,6 +862,11 @@ static void mxs_misc_reset(DeviceState *dev)
     if (s->kind == KIND_CLKCTRL) {
         for (unsigned i = 0; i < ARRAY_SIZE(clkctrl_reset); i++) {
             s->regs[clkctrl_reset[i].idx] = clkctrl_reset[i].val;
+        }
+    }
+    if (s->kind == KIND_POWER) {
+        for (unsigned i = 0; i < ARRAY_SIZE(power_reset); i++) {
+            s->regs[power_reset[i].idx] = power_reset[i].val;
         }
     }
     if (s->kind == KIND_PWM) {
