@@ -6,8 +6,9 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later. See the COPYING file in the top-level directory.
  *
- * Four 32-bit timers counting down at 24 MHz (SELECT=TICK_ALWAYS),
- * 32 kHz / 8 kHz / 100 Hz / 1 kHz / 1 Hz (possibly prescaled).
+ * Four 32-bit timers counting down at 24 MHz (SELECT=TICK_ALWAYS)
+ * or at the 32 kHz crystal derivatives (SELECT=32KHZ/8KHZ/4KHZ/
+ * 1KHZ_XTAL, possibly prescaled).
  *
  * Two counting modes (HW_TIMROT_TIMCTRLn):
  *
@@ -56,12 +57,23 @@
 #define TIMCTRL_PRESCALE      (3 << 4)
 #define TIMCTRL_SELECT        0xf
 
+/*
+ * TIMCTRLn.SELECT encoding (IMX28RM Rev. 2, section 23.4.3): the
+ * i.MX28 (v2) block assigns 0x1-0x8 to PWM0-7, 0x9/0xa to the rotary
+ * inputs, 0xb-0xe to the 32 kHz crystal derivatives and 0xf to
+ * TICK_ALWAYS.  This differs from the i.MX23 (v1) encoding, where
+ * 8-12 selected the crystal rates directly; the model originally
+ * carried the v1 table, so a guest programming the i.MX28-correct
+ * 0xb for 32 kHz ticked at 1 kHz and 0x8 ticked when it should not
+ * tick at all.  Mainline mxs_timer.c agrees (MX28 v2:
+ * 32KHZ_XTAL = 0xb, TICK_ALWAYS = 0xf).  PWM and rotary inputs are
+ * not modelled, so those selections never tick.
+ */
 #define SELECT_NEVER 0
-#define SELECT_32KHZ 8
-#define SELECT_8KHZ  9
-#define SELECT_100HZ 10
-#define SELECT_1KHZ  11
-#define SELECT_1HZ   12
+#define SELECT_32KHZ 11      /* 32KHZ_XTAL: 32768 Hz */
+#define SELECT_8KHZ  12      /* 8KHZ_XTAL: 8192 Hz */
+#define SELECT_4KHZ  13      /* 4KHZ_XTAL: 4096 Hz */
+#define SELECT_1KHZ  14      /* 1KHZ_XTAL: 1024 Hz */
 #define SELECT_TICK  15      /* 24 MHz "tick always" */
 
 OBJECT_DECLARE_SIMPLE_TYPE(MxsTimrotState, MXS_TIMROT)
@@ -104,11 +116,10 @@ static uint64_t timrot_freq(uint32_t ctrl)
     uint32_t prescale = 1 << ((ctrl & TIMCTRL_PRESCALE) >> 4);
 
     switch (sel) {
-    case SELECT_32KHZ: return 32000 / prescale;
-    case SELECT_8KHZ:  return 8000 / prescale;
-    case SELECT_100HZ: return 100 / prescale;
-    case SELECT_1KHZ:  return 1000 / prescale;
-    case SELECT_1HZ:   return 1 / prescale;
+    case SELECT_32KHZ: return 32768 / prescale;
+    case SELECT_8KHZ:  return 8192 / prescale;
+    case SELECT_4KHZ:  return 4096 / prescale;
+    case SELECT_1KHZ:  return 1024 / prescale;
     case SELECT_TICK:  return 24000000 / prescale;
     default:           return 0;      /* PWM/rotary inputs: not modelled */
     }
