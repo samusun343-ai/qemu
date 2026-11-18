@@ -377,7 +377,13 @@ static uint64_t mxs_dma_read(void *opaque, hwaddr addr, unsigned size)
         case 0x20:
             return s->bar[ch];
         case 0x30:
-            return s->sema[ch];
+            /*
+             * PHORE (bits 23:16) is the read view of the channel
+             * semaphore count; the low byte (INCREMENT_SEMA) reads
+             * back zero (IMX28RM Rev. 2, section 6.5.12).  The
+             * model originally returned the count in the low byte.
+             */
+            return (s->sema[ch] & 0xff) << 16;
         case 0x40:
             return 0;   /* DEBUG1 */
         default:
@@ -482,9 +488,19 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
         case 0x00:  /* NXTCMDAR */
             s->nxctmdar[ch] = value;
             return;
-        case 0x30:  /* SEMA: PHORE field increments and starts the channel */
+        case 0x30:  /* SEMA: a write adds INCREMENT_SEMA to PHORE */
         {
-            uint32_t phore = value & 0xff;
+            /*
+             * The SEMA register has no assign semantics: the value
+             * written to its low byte (INCREMENT_SEMA) is added to
+             * the semaphore count (IMX28RM Rev. 2, section 6.5.12),
+             * exactly like the SET alias below.  The model
+             * originally assigned PHORE on plain writes, which
+             * mainline mxs-dma's kick (writel(1 or 2)) could not
+             * distinguish from an increment only because the model
+             * drains the count synchronously.
+             */
+            uint32_t phore = ((s->sema[ch] & 0xff) + (value & 0xff)) & 0xff;
             s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
             if (phore) {
                 mxs_dma_run_channel(s, ch);
