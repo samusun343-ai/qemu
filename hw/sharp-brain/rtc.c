@@ -18,7 +18,8 @@
  *   STAT          0x10
  *   MILLISECONDS  0x20   free-running ms (write re-phases)
  *   SECONDS       0x30   wall-clock seconds (write sets the epoch)
- *   ALARM         0x40
+ *   ALARM         0x40   (compared against SECONDS; a match
+ *                         latches CTRL.ALARM_IRQ, see below)
  *   WATCHDOG      0x50   (stored; reset not modelled yet)
  *   PERSISTENT0-5 0x60..0xb0
  *   DEBUG         0xc0
@@ -26,7 +27,11 @@
  *                         0x02030000; also answered at 0x130,
  *                         where this model originally placed it)
  *
- * IRQ: ICOLL 29 (alarm / onemsec).
+ * IRQ: ICOLL 29 (alarm / onemsec).  The alarm compare is
+ * implemented: when the seconds counter reaches ALARM (with the
+ * alarm function enabled in PERSISTENT0), CTRL.ALARM_IRQ latches
+ * and the line asserts while CTRL.ALARM_IRQ_EN is set.  The
+ * periodic ONEMSEC_IRQ is not generated (no guest uses it).
  */
 
 #include "qemu/osdep.h"
@@ -50,12 +55,15 @@
 
 #define BM_RTC_CTRL_SFTRST        (1u << 31)
 #define BM_RTC_CTRL_CLKGATE       (1u << 30)
+#define BM_RTC_CTRL_ALARM_IRQ_EN   (1u << 0)
+#define BM_RTC_CTRL_ONEMSEC_IRQ_EN (1u << 1)
 #define BM_RTC_CTRL_ALARM_IRQ     (1u << 2)
 #define BM_RTC_CTRL_ONEMSEC_IRQ   (1u << 3)
 #define BM_RTC_CTRL_WATCHDOGEN    (1u << 4)
 #define BM_RTC_CTRL_IRQ           (BM_RTC_CTRL_ALARM_IRQ | \
                                    BM_RTC_CTRL_ONEMSEC_IRQ)
 
+#define BM_RTC_PERSISTENT0_ALARM_EN       (1u << 2)
 #define BM_RTC_PERSISTENT0_AUTO_RESTART   (1u << 17)
 
 /*
@@ -94,6 +102,8 @@ typedef struct MxsRtcState {
     uint32_t persistent[6];
     uint32_t debug;
 
+    QEMUTimer *alarm_timer;    /* fires when SECONDS reaches ALARM */
+
     int64_t sec_base_ns;       /* host ns when the seconds epoch was set */
     uint64_t epoch_seconds;    /* guest-visible seconds at sec_base_ns */
     int64_t ms_base_ns;        /* host ns when MILLISECONDS was written  */
@@ -114,7 +124,16 @@ static void rtc_alias_write(uint32_t *reg, uint32_t off, uint32_t value)
 
 static void rtc_irq_update(MxsRtcState *s)
 {
-    bool irq = !!(s->ctrl & BM_RTC_CTRL_IRQ);
+    /*
+     * The interrupt output is the latched status gated by its
+     * enable (IMX28RM Rev. 2, section 22.8.1: ALARM_IRQ_EN bit 0,
+     * ONEMSEC_IRQ_EN bit 1, ALARM_IRQ bit 2, ONEMSEC_IRQ bit 3).
+     */
+    bool irq = ((s->ctrl & BM_RTC_CTRL_ALARM_IRQ) &&
+                (s->ctrl & BM_RTC_CTRL_ALARM_IRQ_EN)) ||
+               ((s->ctrl & BM_RTC_CTRL_ONEMSEC_IRQ) &&
+                (s->ctrl & BM_RTC_CTRL_ONEMSEC_IRQ_EN));
+
     qemu_set_irq(s->irq, irq);
 }
 
@@ -123,6 +142,44 @@ static uint32_t rtc_seconds(MxsRtcState *s)
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     return s->epoch_seconds + (uint64_t)((now - s->sec_base_ns) / 1000000000);
+}
+
+static void rtc_alarm_timer_cb(void *opaque)
+{
+    MxsRtcState *s = opaque;
+
+    /*
+     * The hardware alarm compare is gated by PERSISTENT0.ALARM_EN
+     * (the guest's alarm_irq_enable sets it together with
+     * CTRL.ALARM_IRQ_EN): a match latches the CTRL.ALARM_IRQ
+     * status bit, which the guest clears through the CTRL CLR
+     * alias in its interrupt handler.
+     */
+    if (s->persistent[0] & BM_RTC_PERSISTENT0_ALARM_EN) {
+        s->ctrl |= BM_RTC_CTRL_ALARM_IRQ;
+        rtc_irq_update(s);
+    }
+}
+
+/*
+ * (Re)arm the alarm timer for the current ALARM / seconds-epoch
+ * state.  An alarm value at or behind the current counter never
+ * matches: on hardware the counter would first have to wrap all
+ * the way around, so no timer is armed at all.
+ */
+static void rtc_alarm_reschedule(MxsRtcState *s)
+{
+    int32_t delta = (int32_t)(s->alarm - rtc_seconds(s));
+
+    if (delta > 0) {
+        int64_t deadline = s->sec_base_ns +
+            (int64_t)(uint32_t)(s->alarm - (uint32_t)s->epoch_seconds) *
+            1000000000LL;
+
+        timer_mod(s->alarm_timer, deadline);
+    } else {
+        timer_del(s->alarm_timer);
+    }
 }
 
 static uint32_t rtc_milliseconds(MxsRtcState *s)
@@ -192,15 +249,23 @@ static void rtc_write(void *opaque, hwaddr addr, uint64_t value,
     case HW_RTC_CTRL:
     {
         uint32_t old = s->ctrl;
+        uint32_t status = s->ctrl & BM_RTC_CTRL_IRQ;
 
         rtc_alias_write(&s->ctrl, off, value);
+        /*
+         * ALARM_IRQ / ONEMSEC_IRQ are hardware status bits: a
+         * register, SET or TOG write cannot raise them; they latch
+         * on the hardware event and clear only when the guest
+         * writes the bit through the CLR alias (which is what the
+         * stmp3xxx-rtc interrupt handler does).
+         */
+        if (off == 8) {
+            status &= ~value;
+        }
+        s->ctrl = (s->ctrl & ~BM_RTC_CTRL_IRQ) | status;
         /* SFTRST rising edge gates the clock (guest reset poll) */
         if (!(old & BM_RTC_CTRL_SFTRST) && (s->ctrl & BM_RTC_CTRL_SFTRST)) {
             s->ctrl |= BM_RTC_CTRL_CLKGATE;
-        }
-        /* the IRQ status bits clear through every alias */
-        if (off == 8 || off == 12) {
-            s->ctrl &= ~BM_RTC_CTRL_IRQ;
         }
         if (s->ctrl & BM_RTC_CTRL_WATCHDOGEN) {
             qemu_log_mask(LOG_UNIMP, "mxs-rtc: watchdog enabled "
@@ -220,9 +285,11 @@ static void rtc_write(void *opaque, hwaddr addr, uint64_t value,
     case HW_RTC_SECONDS:
         s->sec_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         s->epoch_seconds = value;
+        rtc_alarm_reschedule(s);
         return;
     case HW_RTC_ALARM:
         s->alarm = value;
+        rtc_alarm_reschedule(s);
         return;
     case HW_RTC_WATCHDOG:
         s->watchdog = value;
@@ -284,7 +351,8 @@ static void rtc_reset(DeviceState *dev)
         s->persistent[0] = 0x00000100;
         s->powered = true;
     }
-    qemu_set_irq(s->irq, 0);
+    rtc_alarm_reschedule(s);
+    rtc_irq_update(s);
 }
 
 static void rtc_init(Object *obj)
@@ -295,6 +363,8 @@ static void rtc_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &rtc_ops, s, "mxs-rtc", 0x2000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    s->alarm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                  rtc_alarm_timer_cb, s);
 }
 
 static void rtc_class_init(ObjectClass *klass, const void *data)
