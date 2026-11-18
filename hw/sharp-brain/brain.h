@@ -671,6 +671,34 @@ struct BrainKbdState {
      * last holder releases.
      */
     uint8_t contact_refs[BRAIN_KBD_ROWS * BRAIN_KBD_COLS];
+
+    /*
+     * Deferred contacts for symbols-layer chords (see
+     * brain-kbd.c): while the guest scans in the WinCE direction,
+     * a BRAIN_KEY_SYMBOL entry's modifiers land at key-down but
+     * its base contact is held back in a press-ordered queue until
+     * the guest has latched the modifiers, the way a human
+     * pressing 記号 + key behaves.  chord_qstate[] per host key:
+     * 0 = not queued, 1 = queued symbols entry (modifiers applied,
+     * base deferred), 2 = queued direct entry (nothing applied
+     * yet; it queued behind a chord to preserve host order).
+     * chord_release_deferred[] marks queued keys whose host key-up
+     * already arrived; they are released shortly after their base
+     * lands (chord_release_at[]), so a tap faster than the guest's
+     * latch time still completes as a whole chord.
+     */
+    QEMUTimer *chord_timer;
+    int chord_queue[KEY_CNT];
+    int chord_qcount;
+    uint64_t chord_down_ns[KEY_CNT];
+    uint64_t chord_last_land_ns;
+    int chord_scan_ticks;
+    uint32_t chord_last_out;
+    uint32_t chord_last_doe;
+    bool chord_base_deferred[KEY_CNT];
+    int8_t chord_qstate[KEY_CNT];
+    bool chord_release_deferred[KEY_CNT];
+    uint64_t chord_release_at[KEY_CNT];
 };
 
 /* boot ROM emulation (hw/sharp-brain/bootrom.c) */

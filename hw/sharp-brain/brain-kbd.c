@@ -53,6 +53,23 @@
  *     keys can hold one contact (both Shifts, the symbols layer).
  *     Ctrl/Shift state is tracked per key so frontend autorepeat
  *     cannot inflate it.
+ *   - Chord timing: the WinCE keyboard driver folds the symbols
+ *     layer only when the 記号 contact has been latched as a
+ *     modifier well before the base key's press edge -- which is
+ *     what a human typist produces, since the modifier finger
+ *     lands first.  A chord whose contacts all close in the same
+ *     scan is reported as two independent key presses (the base
+ *     key plus a bare 記号 press, which e.g. the dictionary
+ *     search field turns into its "~" wildcard: "<char>~" /
+ *     "~<char>" pairs).  So while the guest scans in the WinCE
+ *     direction, a symbols chord's base contact is queued until
+ *     the guest has swept the matrix with the modifiers down and
+ *     a minimum stagger has elapsed; keys pressed meanwhile queue
+ *     behind it in host order, and a release that arrives early
+ *     takes effect just after the base lands, so the chord always
+ *     completes whole.  The Brainux driver folds only same-scan
+ *     chords, so while the guest drives the columns (its scan
+ *     direction) chords stay atomic.
  */
 
 #include "qemu/osdep.h"
@@ -416,12 +433,61 @@ static void brain_kbd_recalc(BrainKbdState *s)
     mxs_pinctrl_rearm_kbd_irq(s->pinctrl);
 }
 
+/*
+ * Symbols-chord timing in the WinCE scan direction (see
+ * brain_kbd_event()): the guest's driver latches 記号 as a
+ * modifier only once it has been down on its own for a while --
+ * a base contact that lands in the same scan window, or even a
+ * couple of sweeps later, is reported as two independent key
+ * presses.  So a chord's base contact is held back until the
+ * guest has swept the matrix about twice with the modifiers
+ * down (counted from its row-drive activity, ~14 transitions
+ * per sweep) AND at least BRAIN_KBD_CHORD_MIN_MS of wall time
+ * has passed, with a wall-clock fallback for a guest that is
+ * not scanning.  Counting guest scan activity as well as time
+ * keeps the stagger correct under host load.  Queued keys land
+ * in press order, BRAIN_KBD_CHORD_GAP_MS apart, and a key whose
+ * host release arrived while it was queued is released
+ * BRAIN_KBD_CHORD_RELEASE_MS after its base lands, so even a
+ * tap faster than the latch time completes as a whole chord.
+ */
+#define BRAIN_KBD_CHORD_SCAN_TICKS 28
+#define BRAIN_KBD_CHORD_MIN_MS 200
+#define BRAIN_KBD_CHORD_FALLBACK_MS 300
+#define BRAIN_KBD_CHORD_GAP_MS 40
+#define BRAIN_KBD_CHORD_RELEASE_MS 40
+
+static void brain_kbd_chord_process(BrainKbdState *s);
+
 /* pinctrl output hook: the guest re-drove one of the GPIO banks */
 static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
 {
     BrainKbdState *s = opaque;
 
     if (bank == 4) {
+        /* WinCE drives the rows on GPIO4_0..7; Brainux drives the
+         * seventh column on GPIO4_8.  Refresh both views of bank 4
+         * (effective output + output-enable) and re-derive levels. */
+        s->row_out = out;
+        s->row_doe = mxs_pinctrl_get_doe(s->pinctrl, bank);
+        s->col4_out = out;
+        s->col4_doe = s->row_doe;
+        if (s->chord_qcount > 0 && s->chord_qstate[s->chord_queue[0]] == 1) {
+            /*
+             * A symbols chord is waiting for its base contact:
+             * count the guest's row-drive transitions so the base
+             * can land once the guest has swept the matrix with
+             * the modifiers down (see brain_kbd_event()).
+             */
+            if (out != s->chord_last_out || s->row_doe != s->chord_last_doe) {
+                s->chord_last_out = out;
+                s->chord_last_doe = s->row_doe;
+                s->chord_scan_ticks++;
+                brain_kbd_chord_process(s);
+            }
+        }
+        brain_kbd_recalc(s);
+    } else if (bank == 2) {
         /* WinCE drives the rows on GPIO4_0..7; Brainux drives the
          * seventh column on GPIO4_8.  Refresh both views of bank 4
          * (effective output + output-enable) and re-derive levels. */
@@ -493,14 +559,18 @@ static void brain_kbd_sync_shift(BrainKbdState *s)
     brain_kbd_set_contact(s, l->shift_row, l->shift_col, want);
 }
 
-static void brain_kbd_apply(BrainKbdState *s, const BrainKeyDef *e, bool down)
+/*
+ * The modifier half of an entry: the 記号 contact plus the Shift
+ * force/suppress bookkeeping.  Split out from brain_kbd_apply()
+ * because a symbols chord in the WinCE scan direction applies its
+ * modifiers first and its base contact a little later (see
+ * brain_kbd_event()).
+ */
+static void brain_kbd_apply_mods(BrainKbdState *s, const BrainKeyDef *e,
+                                 bool down)
 {
     const BrainKbdLayout *l = s->layout;
 
-    if (!e || e->row < 0 || e->flags == 0) {
-        return;
-    }
-    brain_kbd_set_contact(s, e->row, e->col, down);
     if (e->flags & BRAIN_KEY_SYMBOL) {
         brain_kbd_set_contact(s, l->symbol_row, l->symbol_col, down);
     }
@@ -520,6 +590,153 @@ static void brain_kbd_apply(BrainKbdState *s, const BrainKeyDef *e, bool down)
         }
         brain_kbd_sync_shift(s);
     }
+}
+
+static void brain_kbd_apply(BrainKbdState *s, const BrainKeyDef *e, bool down)
+{
+    if (!e || e->row < 0 || e->flags == 0) {
+        return;
+    }
+    brain_kbd_set_contact(s, e->row, e->col, down);
+    brain_kbd_apply_mods(s, e, down);
+}
+
+/*
+ * Is the guest scanning in the Brainux/Linux direction (driving
+ * the columns, reading the rows)?  That driver folds only chords
+ * whose contacts land in the same scan pass, so chords must stay
+ * atomic while it is in charge.  The WinCE driver (drives the
+ * rows, reads the columns) is the opposite: it folds the symbols
+ * layer only for a base key whose press edge arrives in a later
+ * scan than the 記号 contact.
+ */
+static bool brain_kbd_columns_driven(BrainKbdState *s)
+{
+    return (s->col2_doe & 0x3f0000) != 0 || (s->col4_doe & 0x100) != 0;
+}
+
+/* Release the contacts a latched key-down closed. */
+static void brain_kbd_release_entry(BrainKbdState *s, unsigned int key)
+{
+    const BrainKeyDef *e = &s->active[key];
+
+    if (e->flags == 0) {
+        return;
+    }
+    if (s->chord_base_deferred[key]) {
+        /* The base contact never landed: release only the
+         * modifiers the key-down applied. */
+        s->chord_base_deferred[key] = false;
+        brain_kbd_apply_mods(s, e, false);
+    } else {
+        brain_kbd_apply(s, e, false);
+    }
+    s->active[key].flags = 0;
+    brain_kbd_recalc(s);
+}
+
+/* Arm the chord timer for the next pending landing or release. */
+static void brain_kbd_chord_schedule(BrainKbdState *s)
+{
+    uint64_t next = UINT64_MAX, cand;
+    unsigned int i;
+
+    if (s->chord_qcount > 0) {
+        int key = s->chord_queue[0];
+
+        if (s->chord_qstate[key] == 1) {
+            cand = s->chord_down_ns[key] +
+                   BRAIN_KBD_CHORD_MIN_MS * SCALE_MS;
+            next = MIN(next, cand);
+            cand = s->chord_down_ns[key] +
+                   BRAIN_KBD_CHORD_FALLBACK_MS * SCALE_MS;
+            next = MIN(next, cand);
+        } else {
+            cand = s->chord_last_land_ns +
+                   BRAIN_KBD_CHORD_GAP_MS * SCALE_MS;
+            next = MIN(next, cand);
+        }
+    }
+    for (i = 0; i < KEY_CNT; i++) {
+        if (s->chord_release_at[i]) {
+            next = MIN(next, s->chord_release_at[i]);
+        }
+    }
+    if (next == UINT64_MAX) {
+        timer_del(s->chord_timer);
+    } else {
+        timer_mod(s->chord_timer, next);
+    }
+}
+
+/* Land the queue head's deferred contact if it is due. */
+static bool brain_kbd_chord_land_head(BrainKbdState *s)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int key;
+    const BrainKeyDef *e;
+
+    if (s->chord_qcount == 0) {
+        return false;
+    }
+    key = s->chord_queue[0];
+    e = &s->active[key];
+    if (s->chord_qstate[key] == 1) {
+        uint64_t held = now - s->chord_down_ns[key];
+
+        if (!((s->chord_scan_ticks >= BRAIN_KBD_CHORD_SCAN_TICKS &&
+               held >= BRAIN_KBD_CHORD_MIN_MS * SCALE_MS) ||
+              held >= BRAIN_KBD_CHORD_FALLBACK_MS * SCALE_MS)) {
+            return false;
+        }
+        brain_kbd_set_contact(s, e->row, e->col, true);
+        s->chord_base_deferred[key] = false;
+    } else {
+        if (now < s->chord_last_land_ns +
+                  BRAIN_KBD_CHORD_GAP_MS * SCALE_MS) {
+            return false;
+        }
+        brain_kbd_apply(s, e, true);
+    }
+    memmove(&s->chord_queue[0], &s->chord_queue[1],
+            sizeof(s->chord_queue[0]) * (s->chord_qcount - 1));
+    s->chord_qcount--;
+    s->chord_qstate[key] = 0;
+    s->chord_last_land_ns = now;
+    s->chord_scan_ticks = 0;
+    s->chord_last_out = s->row_out;
+    s->chord_last_doe = s->row_doe;
+    if (s->chord_release_deferred[key]) {
+        s->chord_release_deferred[key] = false;
+        s->chord_release_at[key] = now +
+            BRAIN_KBD_CHORD_RELEASE_MS * SCALE_MS;
+    }
+    brain_kbd_recalc(s);
+    return true;
+}
+
+/* Land every due queue head and perform every due deferred
+ * release, then re-arm the timer.  Called from the chord timer
+ * and from the guest's scan hook. */
+static void brain_kbd_chord_process(BrainKbdState *s)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    unsigned int i;
+
+    while (brain_kbd_chord_land_head(s)) {
+    }
+    for (i = 0; i < KEY_CNT; i++) {
+        if (s->chord_release_at[i] && s->chord_release_at[i] <= now) {
+            s->chord_release_at[i] = 0;
+            brain_kbd_release_entry(s, i);
+        }
+    }
+    brain_kbd_chord_schedule(s);
+}
+
+static void brain_kbd_chord_cb(void *opaque)
+{
+    brain_kbd_chord_process(opaque);
 }
 
 static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
@@ -581,13 +798,23 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
          * forever.  A stuck contact keeps its column low, so the
          * guest sees the key held down indefinitely.
          */
-        e = &s->active[key];
-        if (e->flags == 0) {
+        if (s->active[key].flags == 0) {
             return;
         }
-        brain_kbd_apply(s, e, false);
-        s->active[key].flags = 0;
-        brain_kbd_recalc(s);
+        if (s->chord_qstate[key] != 0) {
+            /*
+             * The key is still queued behind its chord stagger:
+             * remember the release; it takes effect shortly after
+             * the base contact lands, so the guest sees the whole
+             * chord even for a tap shorter than the stagger.
+             */
+            s->chord_release_deferred[key] = true;
+            return;
+        }
+        if (s->chord_release_at[key]) {
+            return;                 /* release already deferred */
+        }
+        brain_kbd_release_entry(s, key);
         return;
     }
 
@@ -605,7 +832,40 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
     s->active[key] = *e;
-    brain_kbd_apply(s, e, true);
+    if ((e->flags & BRAIN_KEY_SYMBOL) && !brain_kbd_columns_driven(s)) {
+        /*
+         * WinCE scan direction: land the modifier contacts now and
+         * queue the base contact behind the chord stagger, the way
+         * a typist presses 記号 a moment before the base key.  If
+         * the contacts all landed in one scan the guest would
+         * report two independent key presses instead of the chord
+         * (see the file header).  In the Brainux scan direction
+         * the chord stays atomic, as that driver requires.
+         */
+        brain_kbd_apply_mods(s, e, true);
+        s->chord_base_deferred[key] = true;
+        s->chord_qstate[key] = 1;
+        s->chord_queue[s->chord_qcount++] = key;
+        s->chord_down_ns[key] = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (s->chord_qcount == 1) {
+            s->chord_scan_ticks = 0;
+            s->chord_last_out = s->row_out;
+            s->chord_last_doe = s->row_doe;
+        }
+        brain_kbd_chord_schedule(s);
+    } else if (s->chord_qcount > 0) {
+        /*
+         * A chord is still waiting for its stagger: queue this
+         * key behind it untouched, so the guest sees the keys in
+         * host order.
+         */
+        s->chord_qstate[key] = 2;
+        s->chord_queue[s->chord_qcount++] = key;
+        s->chord_down_ns[key] = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        brain_kbd_chord_schedule(s);
+    } else {
+        brain_kbd_apply(s, e, true);
+    }
     brain_kbd_recalc(s);
 }
 
@@ -692,6 +952,10 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
     mxs_pinctrl_set_input(s->pinctrl, 4, 0xff, 0xff);
     mxs_pinctrl_set_output_hook(s->pinctrl, brain_kbd_col_notify, s);
 
+    s->chord_timer = timer_new_ns(QEMU_CLOCK_REALTIME,
+                                  brain_kbd_chord_cb, s);
+    s->chord_qcount = 0;
+
     hs = qemu_input_handler_register(dev, &brain_kbd_handler);
     (void)hs;    /* handler lives as long as the device */
 }
@@ -709,6 +973,16 @@ static void brain_kbd_reset(DeviceState *dev)
     s->shift_applied = false;
     memset(s->active, 0, sizeof(s->active));
     memset(s->contact_refs, 0, sizeof(s->contact_refs));
+    s->chord_qcount = 0;
+    s->chord_scan_ticks = 0;
+    memset(s->chord_qstate, 0, sizeof(s->chord_qstate));
+    memset(s->chord_release_deferred, 0,
+           sizeof(s->chord_release_deferred));
+    memset(s->chord_release_at, 0, sizeof(s->chord_release_at));
+    memset(s->chord_base_deferred, 0, sizeof(s->chord_base_deferred));
+    if (s->chord_timer) {
+        timer_del(s->chord_timer);
+    }
     brain_kbd_recalc(s);
 }
 
