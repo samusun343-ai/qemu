@@ -143,6 +143,17 @@ static bool mxs_dma_read_desc(dma_addr_t addr,
 }
 
 /*
+ * SAIF channels (APBX 4/5) stream against a peripheral that drains
+ * at the sample rate: their descriptors may only complete when the
+ * SAIF pacing timer advances the chain (mxs_dma_pace).  Every other
+ * channel executes synchronously when kicked.
+ */
+static bool mxs_dma_is_streaming(MxsDmaState *s, int ch)
+{
+    return s->is_apbx && (ch == 4 || ch == 5) && s->saif[ch - 4] != NULL;
+}
+
+/*
  * Run one channel until the descriptor chain stops.  Each step is
  * executed synchronously: PIO words are poked into the peripheral,
  * data descriptors call the peripheral's data hook.
@@ -156,12 +167,12 @@ static void mxs_dma_run_budget(MxsDmaState *s, int ch, int budget)
      * SAIF channels carry endless circular descriptor chains (the
      * WaveDev driver double-buffers through two descriptors that
      * point at each other).  Hardware consumes them at the audio
-     * sample rate, so a kick only starts the stream: run a few
-     * descriptors to prime it and leave the resume point in
-     * NXTCMDAR for the SAIF device's pacing timer (mxs_dma_pace).
+     * sample rate, so execution is driven by the SAIF device's
+     * pacing timer (mxs_dma_pace), one descriptor per drain
+     * interval; a kick only posts semaphore credits (see the SEMA
+     * write handlers).
      */
-    bool streaming = s->is_apbx && (ch == 4 || ch == 5) &&
-                     s->saif[ch - 4] != NULL;
+    bool streaming = mxs_dma_is_streaming(s, ch);
     if (streaming && budget > 4) {
         budget = 4;
     }
@@ -350,6 +361,26 @@ void mxs_dma_pace(MxsDmaState *s, int ch, int budget)
     }
 }
 
+/*
+ * Transfer size of the descriptor at the head of a streaming
+ * channel's chain (0 when the channel is idle).  The SAIF pacing
+ * timer uses it to schedule each completion one descriptor drain
+ * time after the previous one, whatever period size the guest
+ * programmed.
+ */
+uint32_t mxs_dma_stream_xfer(MxsDmaState *s, int ch)
+{
+    uint32_t next, bits, xfer, bufaddr;
+    uint32_t pio[16];
+
+    if (!s->nxctmdar[ch] ||
+        !mxs_dma_read_desc(s->nxctmdar[ch], &next, &bits, &xfer,
+                           &bufaddr, pio, ARRAY_SIZE(pio))) {
+        return 0;
+    }
+    return xfer;
+}
+
 static uint64_t mxs_dma_read(void *opaque, hwaddr addr, unsigned size)
 {
     MxsDmaState *s = opaque;
@@ -498,11 +529,13 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
              * originally assigned PHORE on plain writes, which
              * mainline mxs-dma's kick (writel(1 or 2)) could not
              * distinguish from an increment only because the model
-             * drains the count synchronously.
+             * drains the count synchronously.  Streaming (SAIF)
+             * channels only post the credit here; see the SET case
+             * for why they must not execute synchronously.
              */
             uint32_t phore = ((s->sema[ch] & 0xff) + (value & 0xff)) & 0xff;
             s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
-            if (phore) {
+            if (phore && !mxs_dma_is_streaming(s, ch)) {
                 mxs_dma_run_channel(s, ch);
             }
             return;
@@ -515,10 +548,23 @@ static void mxs_dma_write(void *opaque, hwaddr addr, uint64_t value,
              * and then polls SEMA.PHORE until the hardware consumes the
              * descriptor.  Ignoring SET stalls every bus request after
              * the first command of the chain.
+             *
+             * Streaming (SAIF) channels are the exception: the write
+             * only posts credits and nothing executes here.  Their
+             * descriptors complete at the sample rate under the SAIF
+             * pacing timer, as on hardware, where a semaphore credit
+             * merely permits a fetch whose completion waits for the
+             * peripheral to drain the data.  Executing synchronously
+             * here is a livelock with mainline mxs-dma: its cyclic
+             * completion handler replenishes the semaphore from IRQ
+             * context, so each instant completion raises the IRQ that
+             * posts the credit that instantly completes the next
+             * descriptor, wrapping the circular chain at CPU speed
+             * (the Brainux playback interrupt/softirq flood).
              */
             uint32_t phore = ((s->sema[ch] & 0xff) + (value & 0xff)) & 0xff;
             s->sema[ch] = (s->sema[ch] & 0xff000000) | phore;
-            if (phore) {
+            if (phore && !mxs_dma_is_streaming(s, ch)) {
                 mxs_dma_run_channel(s, ch);
             }
             return;

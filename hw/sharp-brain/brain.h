@@ -470,6 +470,7 @@ void mxs_saif_dma_data(MxsSaifState *s, bool to_device,
 
 /* advance a streaming channel's circular chain (SAIF pacing timer) */
 void mxs_dma_pace(MxsDmaState *s, int ch, int budget);
+uint32_t mxs_dma_stream_xfer(MxsDmaState *s, int ch);
 
 /* ------------------------------------------------------------------ */
 /* LRADC (hw/sharp-brain/lradc.c): ADC + 4-wire resistive touch        */

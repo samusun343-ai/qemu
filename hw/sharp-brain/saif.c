@@ -63,9 +63,10 @@
  *   - TX bytes (DMA or CPU) queue in a FIFO and drain to the QEMU
  *     audio backend at 44.1 kHz stereo s16 via a pacing timer and
  *     the backend's avail callback.  The DMA chain is circular
- *     (two double-buffered descriptors), so the DMA engine only
- *     primes it; this device's timer resumes it one buffer per
- *     buffer-duration (mxs_dma_pace), which spreads the driver's
+ *     (two double-buffered descriptors under WinCE), and the DMA
+ *     engine never executes its descriptors synchronously: this
+ *     device's timer completes one descriptor per descriptor
+ *     drain time (mxs_dma_pace), which spreads the driver's
  *     completion IRQs and refills over time like hardware.
  *     Overflow is dropped, not back-pressured.
  *   - RX (record) DMA reads back silence.  The bundled Voice Memo
@@ -151,6 +152,23 @@ static void saif_audio_cb(void *opaque, int avail)
     saif_flush(opaque);
 }
 
+/*
+ * Time the descriptor at the head of this port's DMA chain takes
+ * to drain at the sample rate.  The pacing tick that completes a
+ * descriptor is scheduled one such interval ahead, whatever
+ * period size the guest programmed (2048-byte buffers under
+ * WinCE, ALSA periods under Brainux).
+ */
+static uint64_t saif_pace_interval(MxsSaifState *s)
+{
+    uint32_t xfer = s->dma ? mxs_dma_stream_xfer(s->dma, s->dma_ch) : 0;
+
+    if (!xfer) {
+        return SAIF_PACE_NS;
+    }
+    return (uint64_t)xfer * SAIF_FRAME_NS / SAIF_FRAME_BYTES;
+}
+
 static void saif_timer_cb(void *opaque)
 {
     MxsSaifState *s = opaque;
@@ -158,16 +176,19 @@ static void saif_timer_cb(void *opaque)
     if (saif_running(s)) {
         /*
          * Pace the circular DMA chain at the rate hardware would
-         * consume it: one buffer per tick, so the driver's
-         * completion IRQs (and its buffer refills) are spread over
-         * time instead of arriving in one burst at stream start.
+         * consume it: one descriptor per drain interval, so the
+         * driver's completion IRQs (and its buffer refills) are
+         * spread over time instead of arriving in one burst at
+         * stream start.  This timer is the only engine that
+         * completes streaming descriptors; a DMA semaphore kick
+         * never executes them synchronously (see apbh-dma.c).
          */
         if (s->dma) {
             mxs_dma_pace(s->dma, s->dma_ch, 1);
         }
         saif_flush(s);
         timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  SAIF_PACE_NS);
+                  saif_pace_interval(s));
     }
 }
 
@@ -180,7 +201,7 @@ static void saif_maybe_start(MxsSaifState *s)
         audio_be_set_active_out(s->audio_be, s->voice, true);
     }
     timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              SAIF_PACE_NS);
+              saif_pace_interval(s));
 }
 
 static void saif_push_tx(MxsSaifState *s, const uint8_t *data, uint32_t len)
