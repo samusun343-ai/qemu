@@ -250,12 +250,8 @@ static uint64_t pinctrl_read(void *opaque, hwaddr addr, unsigned size)
 {
     MxsPinctrlState *s = opaque;
     uint32_t reg = addr & ~0xf;
-    uint32_t off = addr & 0xf;
 
-    if (off != 0) {
-        return 0;
-    }
-
+    /* every alias of a register reads back the same value */
     if (reg < PINCTRL_GPIO_OFF) {
         return s->mux[reg / 0x10];
     }
@@ -338,11 +334,16 @@ static void pinctrl_write(void *opaque, hwaddr addr, uint64_t value,
             target = &s->irqpol[b];
             irq_relevant = true;
         } else if (reg == REG_IRQSTAT(b)) {
-            /* write-1-to-clear via the CLR alias or direct 0 */
+            /* the CLR alias (or a direct assign) clears status bits;
+             * SET/TOG follow the generic alias rules */
             if (off == 8) {
                 s->irqstat[b] &= ~value;
             } else if (off == 0) {
                 s->irqstat[b] = value;
+            } else if (off == 4) {
+                s->irqstat[b] |= value;
+            } else {
+                s->irqstat[b] ^= value;
             }
             pinctrl_update_irq(s, b);
             return;
