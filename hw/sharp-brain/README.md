@@ -354,12 +354,19 @@ Two-stage sub-functions (記号+Home = 検索， 記号+一覧 =
 the model delivers the physical chords (Ctrl+F / Ctrl+M
 combos, or hold 記号 via Ctrl+S and press the key), and the
 Brainux driver reports the sub-function codes for them (evdev
-audit).  In the stock WinCE apps tried (launcher, 一括検索，
-dictionary entries), the guest answered with the key's primary
-function instead (Home -> launcher, 一覧 -> list); no WinCE
-context was found in this pass where the sub-function itself
-triggers, so treat the sub-functions as delivered-but-not-
-confirmed on WinCE.
+audit).  The chords are delivered as genuine matrix chords;
+driver-level tracing (p33, gdb breakpoints at the guest scan
+thread, GetEventEx2 and KeybdDriverVKeyToUnicode) proves the
+WinCE keyboard driver and GWES pass the chord through as
+VK_F12 (記号) + the key's primary VK with no sub-function
+decode -- the driver's table-layer machinery is never
+activated, and its only latch is sticky-Shift.  The stock
+apps answer with the primary function in all tested contexts
+and timings (atomic and staggered delivery, long holds,
+dictionary search and entry views), so the sub-functions
+appear to be a guest-software binding the stock image does
+not exercise; the functions themselves exist in WinCE as
+touch tools (e.g. the dictionary entry-view toolbar).
 
 ## WinCE suspend/resume (works end to end)
 
