@@ -188,7 +188,6 @@ struct Imx28State {
      * both on (IRAM 1MB section) and off (this mirror).
      */
     MemoryRegion iram_mirror;
-    BlockBackend *emmc_blk;     /* eMMC backend, used by the boot ROM */
     char *cpu_type;
 };
 
