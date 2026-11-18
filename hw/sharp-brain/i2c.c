@@ -42,6 +42,7 @@
 #define HW_I2C_QUEUECMD    0x080
 #define HW_I2C_QUEUEDATA   0x090
 #define HW_I2C_DATA(n)     (0x0a0 + (n) * 0x10)
+#define HW_I2C_VERSION     0x0d0
 
 #define BM_CTRL0_SFTRST      (1u << 31)
 #define BM_CTRL0_CLKGATE     (1u << 30)
@@ -209,7 +210,13 @@ static uint64_t i2c_read(void *opaque, hwaddr addr, unsigned size)
     case HW_I2C_CTRL1:
         return s->ctrl1;
     case HW_I2C_STAT:
-        return s->stat | BM_STAT_MASTER_PRESENT;
+        /*
+         * Both function-presence bits read one on the i.MX28
+         * (IMX28RM Rev. 2, section 27.5.6: MASTER_PRESENT bit 31,
+         * SLAVE_PRESENT bit 30; the register resets to 0xc0000000).
+         * The model originally reported only MASTER_PRESENT.
+         */
+        return s->stat | BM_STAT_MASTER_PRESENT | BM_STAT_SLAVE_PRESENT;
     case HW_I2C_TIMING1:
         return s->timing1;
     case HW_I2C_TIMING2:
@@ -222,6 +229,9 @@ static uint64_t i2c_read(void *opaque, hwaddr addr, unsigned size)
         return s->queuecmd;
     case HW_I2C_QUEUEDATA:
         return s->queuedata;
+    case HW_I2C_VERSION:
+        /* IMX28RM Rev. 2, ch. 27 memory map: 0x01040000 */
+        return 0x01040000;
     default:
         if (reg >= HW_I2C_DATA(0) && reg < HW_I2C_DATA(4)) {
             return s->data[(reg - HW_I2C_DATA(0)) / 0x10];
@@ -300,6 +310,8 @@ static void i2c_write_one(MxsI2cState *s, uint32_t reg, uint32_t off,
     case HW_I2C_QUEUEDATA:
         i2c_alias_write(&s->queuedata, off, val);
         return;
+    case HW_I2C_VERSION:
+        return;    /* read-only */
     default:
         if (reg >= HW_I2C_DATA(0) && reg < HW_I2C_DATA(4)) {
             i2c_alias_write(&s->data[(reg - HW_I2C_DATA(0)) / 0x10],
@@ -425,9 +437,18 @@ static void i2c_reset(DeviceState *dev)
     MxsI2cState *s = MXS_I2C(dev);
 
     s->ctrl0 = 0;
-    s->ctrl1 = 0;
+    /*
+     * Power-on values (IMX28RM Rev. 2, ch. 27 memory map): the
+     * TIMING registers reset to their standard-mode defaults and
+     * CTRL1 to 0x08860000 (ACK_MODE set, slave-address byte 0x86;
+     * all IRQ enables and status bits clear, so the reset state
+     * cannot raise the interrupt line).
+     */
+    s->ctrl1 = 0x08860000;
     s->stat = 0;
-    s->timing0 = s->timing1 = s->timing2 = 0;
+    s->timing0 = 0x00780030;
+    s->timing1 = 0x00800030;
+    s->timing2 = 0x00300030;
     s->queuectrl = s->queueend = s->queuecmd = s->queuedata = 0;
     memset(s->data, 0, sizeof(s->data));
     s->run_pending = false;
