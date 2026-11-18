@@ -187,8 +187,8 @@ static void nand_build_onfi(uint8_t *p)
     /* manufacturer / model */
     memcpy(p + 32, "MICRON", 6);
     memcpy(p + 44, "MT29F2G08ABADA", 13);
-    /* jedec id */
-    p[64] = 0x00;
+    /* jedec id: 0x2c = Micron (matches the manufacturer string) */
+    p[64] = 0x2c;
     /* byte per page (LE32 @80) */
     p[80] = 0x00; p[81] = 0x08; p[82] = 0x00; p[83] = 0x00;
     /* spare bytes per page (LE16 @84) */
@@ -203,8 +203,14 @@ static void nand_build_onfi(uint8_t *p)
     p[96] = 0x00; p[97] = 0x08; p[98] = 0x00; p[99] = 0x00;
     /* LUN count @100 */
     p[100] = 0x01;
-    /* address cycles @101 = 5 (2 column + 3 row) */
-    p[101] = 0x05;
+    /*
+     * address cycles @101: ONFI packs this byte as row cycles in
+     * the high nibble and column cycles in the low nibble, so
+     * 3 row + 2 column cycles is 0x32.  (The model originally
+     * stored the total, 5, which a parameter-page parser decodes
+     * as 5 column and 0 row cycles.)
+     */
+    p[101] = 0x32;
     /* bits per cell @102 = 1 (SLC) */
     p[102] = 0x01;
     /* bad blocks per LUN (LE16 @103) = 20 */
@@ -1048,7 +1054,10 @@ static void mxs_gpmi_reset(DeviceState *dev)
 
     s->ctrl0 = s->compare = s->eccctrl = s->ecccount = 0;
     s->payload = s->auxiliary = 0;
-    s->ctrl1 = s->timing0 = s->timing1 = s->timing2 = 0;
+    /* power-on values (IMX28RM Rev. 2, ch. 15 memory map) */
+    s->ctrl1 = 0x00040004;     /* HW_GPMI_CTRL1 */
+    s->timing0 = 0x00010203;   /* HW_GPMI_TIMING0 */
+    s->timing1 = s->timing2 = 0;
     s->stat = GPMI_STAT_PRESENT | GPMI_STAT_FIFO_EMPTY;
     s->debug = 0;
     s->bch_ctrl = s->bch_status0 = s->bch_mode = 0;
@@ -1097,12 +1106,15 @@ static void mxs_gpmi_init(Object *obj)
         }
     }
 
-    /* VERSION values: the driver was not observed reading them, and
-     * the exact i.MX28 values were not verified from a primary
-     * source -- report a plausible MAJOR/MINOR and flag as
-     * unverified in the header comment. */
-    s->version = (3u << 24) | (0u << 16) | 0u;      /* GPMI 3.0 */
-    s->bch_version = (2u << 24) | (0u << 16) | 0u;  /* BCH 2.0 */
+    /*
+     * VERSION values, now verified against the IMX28RM Rev. 2
+     * memory maps: HW_GPMI_VERSION (ch. 15) resets to 0x03010000
+     * and BCH_VERSION (ch. 16) to 0x01000000.  The model
+     * originally reported GPMI 3.0 / BCH 2.0 as unverified
+     * guesses.
+     */
+    s->version = 0x03010000;       /* GPMI 3.1 */
+    s->bch_version = 0x01000000;   /* BCH 1.0 */
 }
 
 static void mxs_gpmi_class_init(ObjectClass *klass, const void *data)
