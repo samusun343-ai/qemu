@@ -294,9 +294,25 @@ Model behaviours worth knowing:
   blank-word operator, as in SHARP's manual: the Symbol key
   "enters symbols such as ? or ～"), so a host digit keypress
   appears there as "～" followed by the plain letter.  That is
-  the guest software treating the physically faithful chord; the
-  model delivers both contacts together, as the real keyboard
-  does.
+  the guest software treating the physically faithful chord.
+  The model delivers the chord the way a typist does -- modifier
+  contact first, base contact after the guest has had time to
+  latch the modifier (see the chord-timing note below) -- so the
+  pair always comes out in human press order; an earlier build
+  closed both contacts in the same instant and the guest
+  reported them in matrix scan order, which for base keys in
+  rows above the 記号 row produced the reversed "<char>～"
+  artifact.
+* Chord timing (WinCE scan direction): a symbols chord's
+  modifier contacts land at key-down and its base contact is
+  queued until the guest has swept the matrix with the modifiers
+  down and a minimum stagger (200 ms; 300 ms wall-clock fallback)
+  has elapsed.  Keys pressed meanwhile queue behind the chord
+  untouched, so the guest sees every key in host order, and a
+  key released while queued is released just after its base
+  lands, so the chord always completes whole.  In the Brainux
+  scan direction chords stay atomic (that driver folds only
+  same-scan chords).
 * Brainux's brain-kbd-gpio folds the symbols layer in the driver
   and never reports the 記号 key itself.  Two measured quirks of
   that driver (properties of the guest driver, identical on real
@@ -307,6 +323,43 @@ Model behaviours worth knowing:
   its row are not reported (e.g. Shift+A types nothing on
   Brainux).  The evdev audit in the project's regression set
   (p27linux.py) encodes the measured behaviour per key.
+
+Guest-UI verification (2026-11-18, WinCE on pw-aj2 + the
+Brainux evdev audit, 129 tests x jis/us, 0 fails).  Every
+physical key's host path was exercised in the WinCE UI:
+
+| Brain key | host path | verified effect in WinCE |
+|---|---|---|
+| A-Z letters | direct | type into the search field (full alphabet in order) |
+| Space | Space / Henkan / Muhenkan | 変換・確定 in the Japanese field (commits the segment; no literal space) |
+| Enter | Enter | executes the search / opens the entry |
+| 削除 | Backspace / Delete | Backspace deletes left; Delete forward-deletes (field "…ab" -> Left, Delete -> "…a") |
+| 戻る | Esc / Ctrl+B | steps back one screen (entry -> results -> search) |
+| Home | Home | returns to the launcher from every app tried |
+| 履歴 | Ctrl+H / Insert | opens the 履歴 list (shows looked-up words, e.g. "G英和: aplenty") |
+| My辞書 | Ctrl+D | opens the registered dictionary (ニューワイド学習百科事典 on the stock image) |
+| 国語 | Ctrl+K | opens 旺文社標準国語辞典 |
+| 英和 | Ctrl+J | opens ベーシックジーニアス英和辞典 |
+| 一覧 | Ctrl+L | opens 一覧から選ぶ |
+| 音声 | Ctrl+V | in an entry, enters the pronunciation mode ([決定]で発音， volume display) |
+| Up/Down | direct | moves the selection in lists and fields |
+| Left/Right | direct | moves the cursor in fields; switches the category tab in 一覧から選ぶ |
+| PageUp/PageDown | direct | scrolls a long dictionary entry by a page (and back, pixel-exact) |
+| Shift | host Shift | capital chord delivered (the search app lowercases its field; ATR shows the same letters uppercase -- app-side casing) |
+| 記号 | Ctrl+S hold / Zenkakuhankaku / KatakanaHiragana | in search fields inserts the blank-word "～" by design (see above) |
+| digits/symbols | host digit/punct keys (chords) | modifier-first pair in search fields (see above); folded by the driver on Brainux (evdev audit) |
+
+Two-stage sub-functions (記号+Home = 検索， 記号+一覧 =
+マーカー, 記号+英和 = 英和/和英 toggle, 記号+音声 = 文字切替）:
+the model delivers the physical chords (Ctrl+F / Ctrl+M
+combos, or hold 記号 via Ctrl+S and press the key), and the
+Brainux driver reports the sub-function codes for them (evdev
+audit).  In the stock WinCE apps tried (launcher, 一括検索，
+dictionary entries), the guest answered with the key's primary
+function instead (Home -> launcher, 一覧 -> list); no WinCE
+context was found in this pass where the sub-function itself
+triggers, so treat the sub-functions as delivered-but-not-
+confirmed on WinCE.
 
 ## WinCE suspend/resume (works end to end)
 
