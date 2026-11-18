@@ -40,6 +40,8 @@
 #define HW_LRADC_STATUS       0x040
 #define HW_LRADC_CH(n)        (0x050 + (n) * 0x10)
 #define HW_LRADC_DELAY(n)     (0x0d0 + (n) * 0x10)
+#define HW_LRADC_DEBUG0       0x110
+#define HW_LRADC_DEBUG1       0x120
 #define HW_LRADC_CONVERSION   0x130
 #define HW_LRADC_CTRL4        0x140
 #define HW_LRADC_THRESHOLD(n) (0x150 + (n) * 0x10)
@@ -68,6 +70,14 @@
 /* STATUS bits */
 #define BM_STATUS_TOUCH_PRESENT  (1 << 24)
 #define BM_STATUS_TOUCH_RAW      (1 << 0)   /* 1 = touch detected */
+/*
+ * STATUS bits 28:16 are the static PRESENT flags (BUTTON1/BUTTON0/
+ * TEMP1/TEMP0/TOUCH_PANEL/CHANNEL7-0_PRESENT), which always read
+ * one on the i.MX28 (IMX28RM Rev. 2, section 38.5.5: the register
+ * resets to 0x1fff0000).  Only TOUCH_DETECT_RAW (bit 0) is dynamic
+ * in this model.
+ */
+#define BM_STATUS_PRESENT_MASK   0x1fff0000u
 
 /* CH bits */
 #define BM_CH_TOGGLE     (1 << 31)
@@ -378,16 +388,23 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
     {
         BRAIN_LOG("mxs-lradc: read STATUS -> 0x%08x\n",
                       s->status);
-        uint32_t v = s->status & ~BM_STATUS_TOUCH_RAW;
+        uint32_t v = (s->status & ~BM_STATUS_TOUCH_RAW) |
+                     BM_STATUS_PRESENT_MASK;
         if (s->touch_down) {
-            v |= BM_STATUS_TOUCH_RAW | BM_STATUS_TOUCH_PRESENT;
+            v |= BM_STATUS_TOUCH_RAW;
         }
         return v;
     }
+    case HW_LRADC_DEBUG0:
+        /* read-only debug signature (IMX28RM ch. 38 memory map) */
+        return 0x43210000;
+    case HW_LRADC_DEBUG1:
+        return s->debug1;
     case HW_LRADC_CONVERSION:
         return s->conversion;
     case HW_LRADC_VERSION:
-        return 0x010000;
+        /* IMX28RM ch. 38 memory map: HW_LRADC_VERSION = 0x01030000 */
+        return 0x01030000;
     default:
         for (int n = 0; n < MXS_LRADC_NUM_CH; n++) {
             if ((offset & ~0xcull) == HW_LRADC_CH(n)) {
@@ -464,6 +481,9 @@ static void lradc_write(void *opaque, hwaddr offset, uint64_t val,
     case HW_LRADC_CONVERSION:
         lradc_alias_write(&s->conversion, offset & 0xc, val);
         return;
+    case HW_LRADC_DEBUG1:
+        lradc_alias_write(&s->debug1, offset & 0xc, val);
+        return;
     default:
         for (int n = 0; n < MXS_LRADC_NUM_CH; n++) {
             if ((offset & ~0xcull) == HW_LRADC_CH(n)) {
@@ -508,9 +528,20 @@ static void lradc_reset(DeviceState *dev)
 {
     MxsLradcState *s = MXS_LRADC(dev);
 
-    s->ctrl0 = s->ctrl1 = s->ctrl2 = s->ctrl3 = s->ctrl4 = 0;
+    s->ctrl0 = s->ctrl1 = s->ctrl3 = 0;
+    /*
+     * Power-on values from the IMX28RM Rev. 2 ch. 38 memory map:
+     * CTRL2 resets to 0x00008000 (analog trim defaults), CTRL4 to
+     * the identity channel-select map 0x76543210 (without it an
+     * unprogrammed conversion on virtual channel 6/7 would sample
+     * physical channel 0 instead of 6/7), and CONVERSION to
+     * 0x00000080 (the power-on SCALED_BATT_VOLTAGE reading).
+     */
+    s->ctrl2 = 0x00008000;
+    s->ctrl4 = 0x76543210;
     s->status = 0;
-    s->conversion = 0;
+    s->conversion = 0x00000080;
+    s->debug1 = 0;
     memset(s->ch, 0, sizeof(s->ch));
     memset(s->delay, 0, sizeof(s->delay));
     memset(s->threshold, 0, sizeof(s->threshold));

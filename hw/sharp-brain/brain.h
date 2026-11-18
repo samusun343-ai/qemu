@@ -499,6 +499,7 @@ struct MxsLradcState {
     bool sd_card_present;
     uint32_t conversion;
     uint32_t threshold[2];
+    uint32_t debug1;
 
     /* touchscreen state */
     bool touch_down;
