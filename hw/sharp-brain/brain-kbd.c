@@ -488,15 +488,6 @@ static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
         }
         brain_kbd_recalc(s);
     } else if (bank == 2) {
-        /* WinCE drives the rows on GPIO4_0..7; Brainux drives the
-         * seventh column on GPIO4_8.  Refresh both views of bank 4
-         * (effective output + output-enable) and re-derive levels. */
-        s->row_out = out;
-        s->row_doe = mxs_pinctrl_get_doe(s->pinctrl, bank);
-        s->col4_out = out;
-        s->col4_doe = s->row_doe;
-        brain_kbd_recalc(s);
-    } else if (bank == 2) {
         /* Brainux drives columns 0..5 on GPIO2_16..21. */
         s->col2_out = out;
         s->col2_doe = mxs_pinctrl_get_doe(s->pinctrl, bank);
