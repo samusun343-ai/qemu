@@ -7,7 +7,37 @@
  * later. See the COPYING file in the top-level directory.
  *
  * The i.MX28 USB0 block at 0x80080000 is the ChipIdea (ARC) USB OTG
- * core.  The SHARP Brain has no USB cable attached in normal use, so
+ * core.  The register layout is the i.MX28 Reference Manual ch.31
+ * map: identification registers at 0x000-0x014, GPTIMERs at 0x080,
+ * SBUSCFG at 0x090, the capability block at 0x100 with
+ * CAPLENGTH = 0x40 (so the operational block starts at USBCMD
+ * 0x140), DCIVERSION at 0x120 and DCCPARAMS at 0x124.
+ *
+ * An earlier version of this file used a map shifted -0x20 for
+ * everything after HCCPARAMS, from naming the raw offsets seen in
+ * bring-up traces.  A dedicated trace experiment (p34) proved that
+ * map wrong and this one right:
+ *
+ *   - The WinCE function driver (UfnPdd) uses fixed offsets from
+ *     its BSP register header -- it never reads CAPLENGTH -- and
+ *     its accesses only decode coherently under the RM names: it
+ *     writes USBMODE = device (2) at 0x1a8, clears USBSTS at
+ *     0x144 and disables USBINTR at 0x148, polls PORTSC1 at 0x184
+ *     (and sets its PHCD bit there when powering down), and does
+ *     read-modify-write on USBCMD at 0x140: set RST, poll for it
+ *     to clear, and write the Interrupt Threshold field -- with
+ *     the value it read back preserved across a re-init, which
+ *     the old map (0x140 as a reads-0 TXFILLTUNING) silently
+ *     dropped.  The old map passed WinCE only because the flat
+ *     stored array returned 0 at the offsets the guest polls.
+ *   - Linux ci_hdrc derives the operational base from CAPLENGTH
+ *     and reads DCCPARAMS at 0x124.  With the old map that read
+ *     landed on USBSTS (0), so the probe reported "doesn't
+ *     support host / no supported roles" and USB stayed dead.
+ *     With the RM values the same driver brings the EHCI host up:
+ *     bus registered, root hub found, one port detected.
+ *
+ * The SHARP Brain has no USB cable attached in normal use, so
  * this is a register-level stub, NOT a USB host/device stack:
  *
  *   - Control registers read back as written (USBCMD, USBINTR,
@@ -15,20 +45,21 @@
  *     TTCTRL, DEVICEADDR, ENDPTLISTADDR, GPTIMERs).  TXFILLTUNING
  *     is the exception: it reads 0 (see the note in
  *     usb_otg_reg_value).
- *   - Capability registers report the core's documented reset
- *     values (CAPLENGTH 0x20, HCIVERSION 0x0100, HCSPARAMS 1 port,
- *     DCCPARAMS 16 endpoints, device+host capable).
- *   - Status registers always read 0: no VBUS / no session (OTGSC),
- *     no device connected (PORTSC1 CCS/PE clear), no interrupts
- *     pending (USBSTS), no setup packets / NAKs / completions, and
- *     ENDPTPRIME / ENDPTFLUSH complete instantly.  That is exactly
- *     the "no cable" state, so the WinCE USB function driver
- *     (UfnPdd) proceeds down its normal "USB is not detected" path.
+ *   - Identification and capability registers report the core's
+ *     documented reset values (ID 0xE401FA05, CAPLENGTH 0x40,
+ *     HCIVERSION 0x0100, HCSPARAMS 1 port, DCCPARAMS 16
+ *     endpoints, device+host capable).
+ *   - Status registers read 0: no VBUS / no session (OTGSC), no
+ *     device connected (PORTSC1 CCS/PE clear), no interrupts
+ *     pending (USBSTS), no setup packets / NAKs / completions,
+ *     and ENDPTPRIME / ENDPTFLUSH complete instantly.  That is
+ *     exactly the "no cable" state, so UfnPdd proceeds down its
+ *     normal "USB is not detected" path.  The one live status bit
+ *     is USBSTS HCHalted, the host-mode halt indication EHCI
+ *     drivers poll while the controller is stopped; see
+ *     usb_otg_reg_value.
  *   - The single IRQ output (ICOLL 93, linux imx28.dtsi) is wired
  *     but never raised: with no cable there is no event to signal.
- *     (An earlier hang at CSP_Init was first blamed on this IRQ
- *     line, but a bisect proved it was the TXFILLTUNING poll
- *     below; the IRQ connection is innocent.)
  *   - Self-clearing command bits do not stick: USBCMD RST/SUTW/
  *     ATDTW and ENDPTCTRL TXR/RXR are cleared on write, and
  *     ENDPTCTRL reads back only the persistent R/W bits (TXE/TXT/
@@ -37,12 +68,11 @@
  *     would hang it (linux-brain drivers/usb/chipidea/bits.h for
  *     the bit numbers).
  *
- * The guest's boot-time accesses (TXFILLTUNING 0x140, ENDPTNAK
- * 0x144, ENDPTNAKEN 0x148, PORTSC1 0x150, OTGSC 0x160, USBMODE
- * 0x164, ENDPTFLUSH 0x170, ENDPTCTRL2 0x184, ENDPTCTRL10/11
- * 0x1a4/0x1a8, SBUSCFG 0x90) are all covered by this map; the
- * register block itself is 0x10000 bytes (imx28.dtsi) but only the
- * low 0x400 bytes hold registers.
+ * The guest's boot-time accesses (USBCMD 0x140, USBSTS 0x144,
+ * USBINTR 0x148, PORTSC1 0x184, OTGSC 0x1a4, USBMODE 0x1a8,
+ * SBUSCFG 0x90) are all covered by this map; the register block
+ * itself is 0x10000 bytes (imx28.dtsi) but only the low 0x400
+ * bytes hold registers.
  */
 
 #include "qemu/osdep.h"
@@ -50,7 +80,7 @@
 #include "hw/core/irq.h"
 #include "brain.h"
 
-/* register offsets (ChipIdea USB OTG core) */
+/* register offsets (i.MX28 RM ch.31 map) */
 #define USB_ID             0x000
 #define USB_HWGENERAL      0x004
 #define USB_HWHOST         0x008
@@ -65,36 +95,42 @@
 #define USB_CAPLENGTH      0x100    /* + HCIVERSION at 0x102 */
 #define USB_HCSPARAMS      0x104
 #define USB_HCCPARAMS      0x108
-#define USB_DCIVERSION     0x110
-#define USB_DCCPARAMS      0x114
-#define USB_USBCMD         0x120
-#define USB_USBSTS         0x124
-#define USB_USBINTR        0x128
-#define USB_FRINDEX        0x12c
-#define USB_DEVICEADDR     0x130
-#define USB_ENDPTLISTADDR  0x134
-#define USB_TTCTRL         0x138
-#define USB_BURSTSIZE      0x13c
-#define USB_TXFILLTUNING   0x140
-#define USB_ENDPTNAK       0x144
-#define USB_ENDPTNAKEN     0x148
-#define USB_PORTSC1        0x150
-#define USB_OTGSC          0x160
-#define USB_USBMODE        0x164
-#define USB_ENDPTSETUPSTAT 0x168
-#define USB_ENDPTPRIME     0x16c
-#define USB_ENDPTFLUSH     0x170
-#define USB_ENDPTSTAT      0x174
-#define USB_ENDPTCOMPLETE  0x178
-#define USB_ENDPTCTRL(n)   (0x17c + (n) * 4)
+#define USB_DCIVERSION     0x120
+#define USB_DCCPARAMS      0x124
+#define USB_USBCMD         0x140
+#define USB_USBSTS         0x144
+#define USB_USBINTR        0x148
+#define USB_FRINDEX        0x14c
+#define USB_DEVICEADDR     0x154
+#define USB_ENDPTLISTADDR  0x158
+#define USB_TTCTRL         0x15c
+#define USB_BURSTSIZE      0x160
+#define USB_TXFILLTUNING   0x164
+#define USB_ENDPTNAK       0x170
+#define USB_ENDPTNAKEN     0x174
+#define USB_PORTSC1        0x184
+#define USB_OTGSC          0x1a4
+#define USB_USBMODE        0x1a8
+#define USB_ENDPTSETUPSTAT 0x1ac
+#define USB_ENDPTPRIME     0x1b0
+#define USB_ENDPTFLUSH     0x1b4
+#define USB_ENDPTSTAT      0x1b8
+#define USB_ENDPTCOMPLETE  0x1bc
+#define USB_ENDPTCTRL(n)   (0x1c0 + (n) * 4)
 
 /* PORTSC1 bits kept on read (writable config); CCS/PE/SUSP and the
  * line-status bits are forced 0: no device is connected. */
 #define PORTSC_READ_MASK   0x0003f000u
 
-/* USBCMD self-clearing bits (ChipIdea bits.h): RST = reset,
- * SUTW/ATDTW = tripwires. */
+/* USBCMD bits: RS (run) and the self-clearing RST/SUTW/ATDTW. */
+#define USBCMD_RS          BIT(0)
 #define USBCMD_SELF_CLEAR  (BIT(1) | BIT(13) | BIT(14))
+
+/* USBSTS HCHalted: a host-mode status bit; in device mode the
+ * shared status register does not carry it. */
+#define USBSTS_HCHALTED    BIT(12)
+#define USBMODE_CM_MASK    0x3u
+#define USBMODE_CM_DEVICE  0x2u
 
 /* ENDPTCTRL persistent R/W bits read back: TXE, TXT, TXS, RXE, RXT,
  * RXS.  TXR/RXR (data-toggle reset, self-clearing) and the
@@ -102,11 +138,17 @@
 #define ENDPTCTRL_READ_MASK   0x008d008du
 #define ENDPTCTRL_SELF_CLEAR  (BIT(22) | BIT(6))
 
-/* capability-register reset values (ChipIdea core) */
-#define CAPLENGTH_HCIVERSION  0x01000020u  /* CAPLENGTH 0x20, EHCI 1.0 */
-#define HCSPARAMS_VALUE        0x00010011u  /* 1 port */
-#define DCIVERSION_VALUE       0x00000100u  /* DCI version 1.0 */
-#define DCCPARAMS_VALUE        0x00000070u  /* 16 endpoints,
+/* identification / capability register reset values (RM ch.31) */
+#define ID_VALUE              0xe401fa05u
+#define HWGENERAL_VALUE       0x00000015u
+#define HWHOST_VALUE          0x10020001u
+#define HWDEVICE_VALUE        0x00000011u
+#define HWTXBUF_VALUE         0x80070a10u
+#define HWRXBUF_VALUE         0x00000810u
+#define CAPLENGTH_HCIVERSION  0x01000040u  /* CAPLENGTH 0x40, EHCI 1.0 */
+#define HCSPARAMS_VALUE       0x00010011u  /* 1 port */
+#define DCIVERSION_VALUE      0x00000001u
+#define DCCPARAMS_VALUE       0x00000188u  /* DEN=8 (16 endpoints),
                                               * device + host capable */
 
 #define USB_OTG_NREGS   (0x400 / 4)
@@ -136,6 +178,18 @@ static uint32_t usb_otg_reg_value(MxsUsbOtgState *s, uint32_t off)
     }
 
     switch (off) {
+    case USB_ID:
+        return ID_VALUE;
+    case USB_HWGENERAL:
+        return HWGENERAL_VALUE;
+    case USB_HWHOST:
+        return HWHOST_VALUE;
+    case USB_HWDEVICE:
+        return HWDEVICE_VALUE;
+    case USB_HWTXBUF:
+        return HWTXBUF_VALUE;
+    case USB_HWRXBUF:
+        return HWRXBUF_VALUE;
     case USB_CAPLENGTH:
         return CAPLENGTH_HCIVERSION;
     case USB_HCSPARAMS:
@@ -147,6 +201,20 @@ static uint32_t usb_otg_reg_value(MxsUsbOtgState *s, uint32_t off)
     case USB_DCCPARAMS:
         return DCCPARAMS_VALUE;
     case USB_USBSTS:
+        /*
+         * No interrupts pending with no cable.  The one live bit
+         * is HCHalted, the host-mode halt indication: EHCI drivers
+         * poll it while the controller is stopped (USBCMD.RS = 0).
+         * In device mode (USBMODE.CM = 2, selected by the WinCE
+         * function driver before it reads status) the shared
+         * register does not carry the bit and reads 0, as before.
+         */
+        if ((s->regs[USB_USBMODE / 4] & USBMODE_CM_MASK) !=
+            USBMODE_CM_DEVICE &&
+            !(s->regs[USB_USBCMD / 4] & USBCMD_RS)) {
+            return USBSTS_HCHALTED;
+        }
+        return 0;
     case USB_FRINDEX:
     case USB_ENDPTNAK:
     case USB_OTGSC:
@@ -159,15 +227,12 @@ static uint32_t usb_otg_reg_value(MxsUsbOtgState *s, uint32_t off)
         return 0;
     case USB_TXFILLTUNING:
         /*
-         * Tuning register: the WinCE driver writes a value here
-         * (2, at boot) and then polls the register until it reads
-         * 0 (observed in boottest57: ~200 consecutive reads of
-         * 0x140 after a write of 2).  A read-as-written model
-         * hangs the driver in that poll.  The unimplemented device
-         * (which always read 0) let the driver proceed, so the
-         * register is modelled as write-accepted / reads-0: the
-         * tuning value is applied to the TX scheduler and does not
-         * read back.
+         * Tuning register: modelled as write-accepted / reads-0;
+         * the tuning value is applied to the TX scheduler and does
+         * not read back.  (Before p34 this treatment lived at
+         * 0x140, where it also satisfied the WinCE driver's USBCMD
+         * reset poll; the register keeps the same treatment at its
+         * RM offset.)
          */
         return 0;
     case USB_PORTSC1:
@@ -215,12 +280,18 @@ static void usb_otg_write(void *opaque, hwaddr addr, uint64_t value,
     }
 
     switch (off) {
+    case USB_ID:
+    case USB_HWGENERAL:
+    case USB_HWHOST:
+    case USB_HWDEVICE:
+    case USB_HWTXBUF:
+    case USB_HWRXBUF:
     case USB_CAPLENGTH:
     case USB_HCSPARAMS:
     case USB_HCCPARAMS:
     case USB_DCIVERSION:
     case USB_DCCPARAMS:
-        /* capability registers are read-only */
+        /* identification / capability registers are read-only */
         return;
     case USB_USBSTS:
     case USB_ENDPTNAK:
