@@ -76,6 +76,54 @@ struct BrainEdna2MbState {
  * flag below.
  */
 
+/*
+ * Storage region adjustments published by the boot chain into the
+ * shared boot-information area of this window (see brain.h).  The
+ * bootrom registers them when it parses the boot stream; they are
+ * kept here, outside the window image, so that the reset below can
+ * reapply them after clearing the window - on real hardware the
+ * values the boot chain leaves in the block survive into the
+ * kernel, while this device's reset would otherwise zero them.
+ * The read/write paths below additionally restore them once after
+ * a boot stage clears the area during its own initialisation.
+ */
+static int32_t edna2_mb_adjust[BRAIN_FAL_REGIONS][2];
+static bool edna2_mb_adjust_valid[BRAIN_FAL_REGIONS];
+static bool edna2_mb_adjust_pending;
+
+void brain_edna2_mb_set_region_adjust(int region, int32_t start_adj,
+                                      int32_t len_adj)
+{
+    if (region < 0 || region >= BRAIN_FAL_REGIONS) {
+        return;
+    }
+    edna2_mb_adjust[region][0] = start_adj;
+    edna2_mb_adjust[region][1] = len_adj;
+    edna2_mb_adjust_valid[region] = true;
+}
+
+static void edna2_mb_apply_adjusts(BrainEdna2MbState *s)
+{
+    int r;
+
+    for (r = 0; r < BRAIN_FAL_REGIONS; r++) {
+        uint32_t pair[2];
+
+        if (!edna2_mb_adjust_valid[r]) {
+            continue;
+        }
+        pair[0] = cpu_to_le32((uint32_t)edna2_mb_adjust[r][0]);
+        pair[1] = cpu_to_le32((uint32_t)edna2_mb_adjust[r][1]);
+        memcpy(&s->regs[BRAIN_BLK_ADJUST_OFF + r * 8], pair, sizeof(pair));
+    }
+}
+
+static bool edna2_mb_touches_adjust(hwaddr addr, unsigned size)
+{
+    return addr < BRAIN_BLK_ADJUST_OFF + BRAIN_FAL_REGIONS * 8 &&
+           addr + size > BRAIN_BLK_ADJUST_OFF;
+}
+
 static void edna2_mb_cmd_start(BrainEdna2MbState *s)
 {
     s->busy = true;
@@ -108,6 +156,12 @@ static uint64_t edna2_mb_read(void *opaque, hwaddr addr, unsigned size)
     BrainEdna2MbState *s = opaque;
     uint64_t v = 0;
 
+    if (edna2_mb_touches_adjust(addr, size) &&
+        edna2_mb_adjust_pending) {
+        /* the boot stage cleared the area; restore the pairs once */
+        edna2_mb_apply_adjusts(s);
+        edna2_mb_adjust_pending = false;
+    }
     if (addr + size <= EDNA2_MB_SIZE) {
         memcpy(&v, &s->regs[addr], size);
     }
@@ -124,6 +178,21 @@ static void edna2_mb_write(void *opaque, hwaddr addr, uint64_t value,
         return;
     }
     memcpy(&s->regs[addr], &value, size);
+
+    /*
+     * The adjustment area is shared RAM, not a register bank: the
+     * guest may use it for its own purposes (the Brainux kernel
+     * parks a code stub there), so guest writes are never absorbed.
+     * But the boot stages clear the area while initialising their
+     * own records in the window, before the storage FALs read the
+     * adjustments.  A guest write of zeros therefore only marks
+     * the pairs pending; the next read of the area restores them
+     * once (see the read path).  A nonzero write takes ownership
+     * of the area and cancels the pending restore.
+     */
+    if (edna2_mb_touches_adjust(addr, size)) {
+        edna2_mb_adjust_pending = (value == 0);
+    }
 
     for (i = addr; i < addr + size; i++) {
         if (i == REG_DOORBELL) {
@@ -169,6 +238,9 @@ static void edna2_mb_reset(DeviceState *dev)
     BrainEdna2MbState *s = BRAIN_EDNA2_MB(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    /* reapply the boot chain's storage region adjustments */
+    edna2_mb_apply_adjusts(s);
+    edna2_mb_adjust_pending = false;
     s->doorbell_armed = false;
     s->cmd_fresh = false;
     s->busy = false;

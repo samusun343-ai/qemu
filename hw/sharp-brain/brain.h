@@ -550,6 +550,22 @@ OBJECT_DECLARE_SIMPLE_TYPE(BrainEdna2MbState, BRAIN_EDNA2_MB)
 #define BRAIN_EDNA2_MB_SIZE    0x1000
 
 /*
+ * The mailbox window doubles as the boot chain's shared
+ * boot-information block.  At +0x940 it carries one (start, length)
+ * adjustment pair per storage region for the WinCE storage FALs;
+ * the boot chain publishes them before the kernel starts (see
+ * bootrom.c).  The mailbox device reapplies the registered pairs at
+ * the end of its reset, after clearing the window, because the
+ * bootrom's reset handling runs before the device reset within the
+ * same system reset.
+ */
+#define BRAIN_BLK_ADJUST_OFF   0x940
+#define BRAIN_FAL_REGIONS      6
+
+void brain_edna2_mb_set_region_adjust(int region, int32_t start_adj,
+                                      int32_t len_adj);
+
+/*
  * Host key -> matrix contact mapping.  Tables are indexed by linux
  * keycode (KEY_CNT entries); the QEMU input core delivers host key
  * events as linux keycodes.

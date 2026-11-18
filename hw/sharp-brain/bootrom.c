@@ -745,6 +745,137 @@ static bool bootrom_run(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* shared boot-information block: storage region adjustments          */
+
+/*
+ * The WinCE storage FALs refine a compiled-in region table with
+ * per-region adjustments that the boot chain publishes in the shared
+ * boot-information block (the block at PA 0x400EA000 whose early
+ * fields the first boot stage initialises) before the kernel starts:
+ * for region r, the 32-bit pair at +0x940 + r*8 is added to the
+ * table's (start, length).
+ *
+ * A region's table entry may point at the filesystem boot sector
+ * directly even though the store's own partition table sits in the
+ * sector just before it (a one-sector store wrapper: an MBR whose
+ * partition starts at the table start and ends exactly where the
+ * filesystem there declares its end).  The adjustment then moves the
+ * region start back onto the wrapper sector and extends the length
+ * to cover it, so the FAL presents the whole store - partition table
+ * included - instead of starting one sector late with a stale
+ * length.  Without it, that store's partition state reads as empty
+ * and the first-run initialisation fails when it tries to create a
+ * partition there.
+ *
+ * The genuine boot chain derives the adjustments from the boot
+ * medium; this reimplementation performs the same scan when the SB
+ * image is parsed.  Regions whose table entry already points at
+ * their store partition table, and regions with no wrapper, keep a
+ * zero adjustment.
+ */
+#define BRAIN_BLK_ADJUST    (BRAIN_EDNA2_MB_BASE + BRAIN_BLK_ADJUST_OFF)
+
+/* the storage FALs' compiled-in region table (start, length) */
+static const struct {
+    uint32_t start;
+    uint32_t length;
+} brain_fal_table[BRAIN_FAL_REGIONS] = {
+    { 161792, 131072 },
+    { 292864, 0 },
+    { 598031, 411648 },
+    { 292864, 305152 },
+    { 1624073, 11278144 },
+    { 159744, 0 },
+};
+
+static bool bootrom_mbr_entry(const uint8_t *sec, int idx,
+                              uint32_t *start, uint32_t *count)
+{
+    const uint8_t *e = &sec[446 + idx * 16];
+
+    if (sec[510] != 0x55 || sec[511] != 0xaa || e[4] == 0) {
+        return false;
+    }
+    *start = ldl_le_p(&e[8]);
+    *count = ldl_le_p(&e[12]);
+    return *count != 0;
+}
+
+static void bootrom_publish_region_adjusts(void)
+{
+    uint8_t sec[512], prev[512];
+
+    for (int r = 0; r < BRAIN_FAL_REGIONS; r++) {
+        uint32_t start = brain_fal_table[r].start;
+        uint32_t length = brain_fal_table[r].length;
+        uint32_t es, ec, total;
+        uint32_t pair[2];
+        bool wrapped = false;
+        int i;
+
+        if (length == 0 || start == 0) {
+            continue;
+        }
+        if (!bootrom_pread((uint64_t)start * 512, sizeof(sec), sec)) {
+            continue;
+        }
+
+        /* table entry already points at the store partition table */
+        for (i = 0; i < 4; i++) {
+            if (bootrom_mbr_entry(sec, i, &es, &ec) && es + ec == length) {
+                break;
+            }
+        }
+        if (i < 4) {
+            continue;
+        }
+
+        /* filesystem boot sector at the table start: its total size */
+        total = lduw_le_p(&sec[19]);
+        if (total == 0) {
+            total = ldl_le_p(&sec[32]);
+        }
+        if (total <= length) {
+            continue;   /* the table view already covers the filesystem */
+        }
+
+        /* a store wrapper MBR in the sector just before it? */
+        if (!bootrom_pread((uint64_t)(start - 1) * 512, sizeof(prev),
+                           prev)) {
+            continue;
+        }
+        for (i = 0; i < 4; i++) {
+            if (bootrom_mbr_entry(prev, i, &es, &ec) &&
+                es == 1 && ec == total) {
+                wrapped = true;
+                break;
+            }
+        }
+        if (!wrapped) {
+            continue;
+        }
+
+        /*
+         * Register the adjustment with the mailbox device, which
+         * owns the block's window and reapplies the pair at the end
+         * of every reset (its reset clears the window and runs
+         * after this reset handling), and write it into the window
+         * directly as well so it is in place even if the reset
+         * order ever changes.
+         */
+        brain_edna2_mb_set_region_adjust(r, -1,
+                                         (int32_t)(total + 1 - length));
+        pair[0] = cpu_to_le32((uint32_t)-1);
+        pair[1] = cpu_to_le32(total + 1 - length);
+        address_space_write(&address_space_memory,
+                            BRAIN_BLK_ADJUST + r * 8,
+                            MEMTXATTRS_UNSPECIFIED, pair, sizeof(pair));
+        BRAIN_LOG("bootrom: region %d store wrapper found: adjust "
+                  "-1/%+d published\n", r, (int)(total + 1 - length));
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* mailbox and reset                                                  */
 
 static void bootrom_mailbox_write(void *opaque, hwaddr addr, uint64_t value,
@@ -781,6 +912,15 @@ static void brain_bootrom_reset(void *opaque)
         /* a stage returned to the ROM: resume the command stream */
         bootrom.mailbox_pending = false;
         BRAIN_LOG("bootrom: stage returned, resuming\n");
+        /*
+         * Republish the region adjustments after every stage
+         * return: the registration lives in the mailbox device,
+         * which reapplies the pairs after its reset clears the
+         * window, so this is only a refresh - but it keeps the
+         * values flowing through one code path regardless of which
+         * stage ran.
+         */
+        bootrom_publish_region_adjusts();
         if (!bootrom_run()) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "bootrom: boot stream complete after stage "
@@ -799,6 +939,7 @@ static void brain_bootrom_reset(void *opaque)
     }
     bootrom.active = true;
     bootrom.cmd_pos = 0;
+    bootrom_publish_region_adjusts();
     if (!bootrom_run()) {
         bootrom_park_cpu();
     }
