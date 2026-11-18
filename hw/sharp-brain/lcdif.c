@@ -37,7 +37,7 @@
 #define HW_LCDIF_DVICTRL(n)       (0x0c0 + (n) * 0x10)
 #define HW_LCDIF_CSC_COEFF(n)     (0x110 + (n) * 0x10)
 #define HW_LCDIF_DATA             0x180
-#define HW_LCDIF_VERSION          0x190
+#define HW_LCDIF_VERSION          0x1c0
 
 #define BM_CTRL_SFTRST        (1u << 31)
 #define BM_CTRL_CLKGATE       (1u << 30)
@@ -627,7 +627,8 @@ static uint64_t lcdif_read(void *opaque, hwaddr addr, unsigned size)
     case HW_LCDIF_TIMING:
         return s->timing;
     case HW_LCDIF_VERSION:
-        /* IMX28RM Rev. 2, ch. 33 memory map: 0x04000000 */
+        /* 0x04000000 (IMX28RM Rev. 2, ch. 33); the register sits at
+         * 0x1c0 — 0x190 is BM_ERROR_STAT in the v4 register map */
         return 0x04000000;
     default:
         if (reg >= HW_LCDIF_VDCTRL(0) && reg < HW_LCDIF_VDCTRL(4)) {
