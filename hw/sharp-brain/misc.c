@@ -757,7 +757,17 @@ static const MemoryRegionOps mxs_misc_ops = {
  * what guests read.
  *
  * Two entries deliberately keep post-boot-ROM state instead of
- * the power-on value: FRAC0/FRAC1 (see their comment below).
+ * the power-on value: FRAC0/FRAC1 (see their comment below) and
+ * XBUS.  The RM map gives XBUS a power-on value of 0x00000100,
+ * but the consumers that matter decode its DIV field at bits
+ * 9:0 (clk-imx28 registers xbus as a shift-0 width-10 divider,
+ * and the timrot clocksource hangs off xbus): on real hardware
+ * the boot chain has reprogrammed XBUS long before the kernel
+ * reads it, while our emulated chain leaves the reset value in
+ * place.  Presenting 0x100 makes the kernel compute the APBX
+ * rate 256x too low while the timrot keeps counting at
+ * 24 MHz - guest time runs away and the clockevent is
+ * misprogrammed (verified: Brainux RCU stalls, no login).
  * HW_CLKCTRL_RESET is also not listed: it powers on as 0x12,
  * whose bit 1 is the chip-reset trigger this model acts on in
  * the write path, so storing the power-on value would reset the
@@ -782,7 +792,7 @@ static const struct {
      */
     { 0x05, 0x00010001 },   /* CPU      (DIV_XTAL 1, DIV_CPU 1) */
     { 0x06, 0x00000001 },   /* HBUS     (div 1) */
-    { 0x07, 0x00000100 },   /* XBUS     (DIV=1 at bits 9:8) */
+    { 0x07, 0x00000001 },   /* XBUS     (div 1; see below) */
     { 0x08, 0x60000001 },   /* XTAL     (PWM_CLK24M gated, DIV_UART 1) */
     { 0x09, 0x80000001 },   /* SSP0     (CLKGATE, div 1) */
     { 0x0a, 0x80000001 },   /* SSP1     (CLKGATE, div 1) */
