@@ -37,6 +37,8 @@
 #define HW_LCDIF_DVICTRL(n)       (0x0c0 + (n) * 0x10)
 #define HW_LCDIF_CSC_COEFF(n)     (0x110 + (n) * 0x10)
 #define HW_LCDIF_DATA             0x180
+#define HW_LCDIF_BM_ERROR_STAT    0x190
+#define HW_LCDIF_STAT             0x1b0
 #define HW_LCDIF_VERSION          0x1c0
 
 #define BM_CTRL_SFTRST        (1u << 31)
@@ -626,19 +628,26 @@ static uint64_t lcdif_read(void *opaque, hwaddr addr, unsigned size)
         return s->next_buf;
     case HW_LCDIF_TIMING:
         return s->timing;
+    case HW_LCDIF_BM_ERROR_STAT:
+        /* no bus-master errors occur in this model */
+        return 0;
+    case HW_LCDIF_STAT:
+        /* polled by the Brainux panel driver; frame completion is
+         * signalled through CTRL1, STAT carries no live bits here */
+        return 0;
     case HW_LCDIF_VERSION:
         /* 0x04000000 (IMX28RM Rev. 2, ch. 33); the register sits at
          * 0x1c0 — 0x190 is BM_ERROR_STAT in the v4 register map */
         return 0x04000000;
     default:
-        if (reg >= HW_LCDIF_VDCTRL(0) && reg < HW_LCDIF_VDCTRL(4)) {
+        if (reg >= HW_LCDIF_VDCTRL(0) && reg < HW_LCDIF_VDCTRL(5)) {
             return s->vdctrl[(reg - HW_LCDIF_VDCTRL(0)) / 0x10];
         }
-        if (reg >= HW_LCDIF_DVICTRL(0) && reg < HW_LCDIF_DVICTRL(4)) {
+        if (reg >= HW_LCDIF_DVICTRL(0) && reg < HW_LCDIF_DVICTRL(5)) {
             return s->dvi[(reg - HW_LCDIF_DVICTRL(0)) / 0x10];
         }
         if (reg >= HW_LCDIF_CSC_COEFF(0) &&
-            reg < HW_LCDIF_CSC_COEFF(0) + 0x40) {
+            reg < HW_LCDIF_CSC_COEFF(0) + 0x70) {
             return s->csc[(reg - HW_LCDIF_CSC_COEFF(0)) / 0x10];
         }
         break;
@@ -717,16 +726,16 @@ static void lcdif_write(void *opaque, hwaddr addr, uint64_t val,
         lcdif_cpu_data(s, val);
         return;
     default:
-        if (reg >= HW_LCDIF_VDCTRL(0) && reg < HW_LCDIF_VDCTRL(4)) {
+        if (reg >= HW_LCDIF_VDCTRL(0) && reg < HW_LCDIF_VDCTRL(5)) {
             s->vdctrl[(reg - HW_LCDIF_VDCTRL(0)) / 0x10] = val;
             return;
         }
-        if (reg >= HW_LCDIF_DVICTRL(0) && reg < HW_LCDIF_DVICTRL(4)) {
+        if (reg >= HW_LCDIF_DVICTRL(0) && reg < HW_LCDIF_DVICTRL(5)) {
             s->dvi[(reg - HW_LCDIF_DVICTRL(0)) / 0x10] = val;
             return;
         }
         if (reg >= HW_LCDIF_CSC_COEFF(0) &&
-            reg < HW_LCDIF_CSC_COEFF(0) + 0x40) {
+            reg < HW_LCDIF_CSC_COEFF(0) + 0x70) {
             s->csc[(reg - HW_LCDIF_CSC_COEFF(0)) / 0x10] = val;
             return;
         }

@@ -308,7 +308,7 @@ struct MxsLcdifPriv {
     /* LCDIF registers */
     uint32_t ctrl, ctrl1, ctrl2;
     uint32_t transfer_count, cur_buf, next_buf, timing;
-    uint32_t vdctrl[4], dvi[4], csc[4];
+    uint32_t vdctrl[5], dvi[5], csc[7]; /* csc: COEF0-4, OFFSET, LIMIT */
 
     /* CPU-mode transfer countdown */
     uint32_t cpu_pending;
