@@ -852,6 +852,27 @@ static const struct {
     { 0x16, 0x84000400 },   /* ANACLKCTRL */
 };
 
+/*
+ * DIGCTL reset defaults, from the HW_DIGCTL memory map (IMX28RM
+ * Rev. 2, ch. 19): mostly the block's signature/debug constants,
+ * which the model originally read back as zero.  CHIPID is not
+ * listed: it is computed in the read path (0x28000012, an i.MX28
+ * at mask revision TO1.2; the RM map's nominal 0x28000000 leaves
+ * the REVISION byte at zero).
+ */
+static const struct {
+    uint32_t idx;
+    uint32_t val;
+} digctl_reset[] = {
+    { 0x00, 0x00010004 },   /* CTRL */
+    { 0x01, 0xff000000 },   /* STATUS */
+    { 0x05, 0x00000002 },   /* READ_MARGIN */
+    { 0x06, 0xa5a5a5a5 },   /* WRITEONCE */
+    { 0x07, 0x40000000 },   /* BIST_CTL */
+    { 0x0d, 0x789abcde },   /* DBGRD */
+    { 0x0e, 0x87654321 },   /* DBG */
+    { 0x30, 0x65657246 },   /* FSL copyright identifier */
+};
 
 static void mxs_misc_reset(DeviceState *dev)
 {
@@ -869,9 +890,16 @@ static void mxs_misc_reset(DeviceState *dev)
             s->regs[power_reset[i].idx] = power_reset[i].val;
         }
     }
+    if (s->kind == KIND_DIGCTL) {
+        for (unsigned i = 0; i < ARRAY_SIZE(digctl_reset); i++) {
+            s->regs[digctl_reset[i].idx] = digctl_reset[i].val;
+        }
+    }
     if (s->kind == KIND_PWM) {
         /* PWM0..7_PRESENT bits so PwmInitialize's channel scan passes */
         s->regs[0] = 0x3fc00000;
+        /* HW_PWM_VERSION (IMX28RM Rev. 2, ch. 28 memory map) */
+        s->regs[0x11] = 0x01060000;
     }
 }
 
