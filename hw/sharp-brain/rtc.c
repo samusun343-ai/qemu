@@ -22,7 +22,9 @@
  *   WATCHDOG      0x50   (stored; reset not modelled yet)
  *   PERSISTENT0-5 0x60..0xb0
  *   DEBUG         0xc0
- *   VERSION       0x130  major 1 (stmp3xxx-style block on i.MX28)
+ *   VERSION       0xd0   (IMX28RM Rev. 2, ch. 22 memory map:
+ *                         0x02030000; also answered at 0x130,
+ *                         where this model originally placed it)
  *
  * IRQ: ICOLL 29 (alarm / onemsec).
  */
@@ -41,7 +43,10 @@
 #define HW_RTC_WATCHDOG       0x050
 #define HW_RTC_PERSISTENT(n)  (0x060 + (n) * 0x10)
 #define HW_RTC_DEBUG          0x0c0
-#define HW_RTC_VERSION        0x130
+#define HW_RTC_VERSION        0x0d0
+/* the offset this model originally used for VERSION; kept as an
+ * alias answering the same value, in case a guest header uses it */
+#define HW_RTC_VERSION_ALIAS  0x130
 
 #define BM_RTC_CTRL_SFTRST        (1u << 31)
 #define BM_RTC_CTRL_CLKGATE       (1u << 30)
@@ -58,11 +63,14 @@
  * the kernel OAL):
  *   bit 31 RTC_PRESENT   - "ERROR: InitRTC: NO RTC Present!" if 0
  *   bit 30 ALARM_PRESENT - "ERROR: InitRTC: NO ALARM Present!" if 0
+ *   bit 29 WATCHDOG_PRESENT (IMX28RM Rev. 2, section 22.8.2; the
+ *   RM's example code checks it like the other two)
  * The writable handshake bits (STALE/NEW_REGS, 0xff0000) stay clear so
  * the post-reset poll loops complete immediately.
  */
 #define BM_RTC_STAT_RTC_PRESENT    (1u << 31)
 #define BM_RTC_STAT_ALARM_PRESENT  (1u << 30)
+#define BM_RTC_STAT_WATCHDOG_PRESENT (1u << 29)
 
 /* The seconds counter starts from 0 (unset): a real i.MX28 RTC with no
  * battery backup reads 0 at power-on, and the WinCE RTC driver treats
@@ -138,7 +146,8 @@ static uint64_t rtc_read(void *opaque, hwaddr addr, unsigned size)
     case HW_RTC_CTRL:
         return s->ctrl;
     case HW_RTC_STAT:
-        return s->stat | BM_RTC_STAT_RTC_PRESENT | BM_RTC_STAT_ALARM_PRESENT;
+        return s->stat | BM_RTC_STAT_RTC_PRESENT |
+               BM_RTC_STAT_ALARM_PRESENT | BM_RTC_STAT_WATCHDOG_PRESENT;
     case HW_RTC_MILLISECONDS:
         return rtc_milliseconds(s);
     case HW_RTC_SECONDS:
@@ -150,7 +159,9 @@ static uint64_t rtc_read(void *opaque, hwaddr addr, unsigned size)
     case HW_RTC_DEBUG:
         return s->debug;
     case HW_RTC_VERSION:
-        return 0x010000;       /* major 1, minor 0 */
+    case HW_RTC_VERSION_ALIAS:
+        /* IMX28RM Rev. 2, ch. 22 memory map: 0x02030000 */
+        return 0x02030000;
     default:
         if (reg >= HW_RTC_PERSISTENT(0) && reg <= HW_RTC_PERSISTENT(5)) {
             return s->persistent[(reg - HW_RTC_PERSISTENT(0)) / 0x10];
@@ -219,6 +230,9 @@ static void rtc_write(void *opaque, hwaddr addr, uint64_t value,
     case HW_RTC_DEBUG:
         s->debug = value;
         return;
+    case HW_RTC_VERSION:
+    case HW_RTC_VERSION_ALIAS:
+        return;    /* read-only */
     default:
         break;
     }
@@ -259,6 +273,15 @@ static void rtc_reset(DeviceState *dev)
         s->epoch_seconds = RTC_DEFAULT_EPOCH_SECONDS;
         s->ms_base_ns = s->sec_base_ns;
         s->ms_offset = 0;
+        /*
+         * Power-on values (IMX28RM Rev. 2, ch. 22 memory map):
+         * HW_RTC_WATCHDOG resets to all-ones and PERSISTENT0 to
+         * 0x100 (its millisecond-resolution field, bits 12:8,
+         * at the 1 ms setting).  Both live in the always-on
+         * domain, so they are anchored here, once.
+         */
+        s->watchdog = 0xffffffff;
+        s->persistent[0] = 0x00000100;
         s->powered = true;
     }
     qemu_set_irq(s->irq, 0);
