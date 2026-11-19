@@ -70,6 +70,31 @@
  *     completes whole.  The Brainux driver folds only same-scan
  *     chords, so while the guest drives the columns (its scan
  *     direction) chords stay atomic.
+ *   - Release timing in the Brainux direction: that driver polls
+ *     the matrix, so it only ever sees a press whose contact is
+ *     still closed when its scan sweeps the key's column.  A host
+ *     key-up arrives on wall time, but the guest's scan advances
+ *     only when its vCPU is scheduled, so under host load a short
+ *     press can open again before any sweep reaches it and the
+ *     keystroke vanishes (at the Brainux login dialog this reads
+ *     as "authentication error" for a correctly typed password).
+ *     While the guest drives the columns, a release is therefore
+ *     held back until the guest has driven the key's column low
+ *     with the contact closed and moved on -- the scan provably
+ *     sampled the rows in between -- and, because the guest's
+ *     poll debounce only accepts a key that is still present at
+ *     the next sweep, until a later sweep has witnessed it again;
+ *     capped at 2000 ms of wall
+ *     time for a guest that stops scanning (the Brainux guest
+ *     can go longer than a second without sweeping while it is
+ *     busy starting a session).  The held-back
+ *     release lands as soon as the second witnessing sweep moves
+ *     on, so the guest-visible hold stays short however
+ *     long the press waited to be seen; the cap only bounds how
+ *     long an unseen press may wait.  A press that arrives while
+ *     an earlier one is still unwitnessed queues behind it, so a
+ *     slow sweep cannot report a burst of presses in column
+ *     order instead of the order they were typed in.
  */
 
 #include "qemu/osdep.h"
@@ -458,6 +483,19 @@ static void brain_kbd_recalc(BrainKbdState *s)
 #define BRAIN_KBD_CHORD_RELEASE_MS 40
 
 static void brain_kbd_chord_process(BrainKbdState *s);
+static bool brain_kbd_columns_driven(BrainKbdState *s);
+/* Idle gap between two column-drive bursts that counts as a new
+ * sweep of the guest's scan (its bursts are a few ms wide and its
+ * poll period is about 100 ms). */
+#define BRAIN_KBD_SCAN_SWEEP_GAP_MS 30
+
+/* After a press has been witnessed in a second sweep the guest
+ * has confirmed it; the release follows this short grace later
+ * (its row read within that pass completes in well under a ms),
+ * so the hold it reports stays far below its autorepeat delay. */
+#define BRAIN_KBD_SCAN_CONFIRM_GRACE_MS 30
+
+static void brain_kbd_scan_witness(BrainKbdState *s);
 
 /* pinctrl output hook: the guest re-drove one of the GPIO banks */
 static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
@@ -492,6 +530,22 @@ static void brain_kbd_col_notify(void *opaque, int bank, uint32_t out)
         s->col2_out = out;
         s->col2_doe = mxs_pinctrl_get_doe(s->pinctrl, bank);
         brain_kbd_recalc(s);
+    }
+    if (brain_kbd_columns_driven(s)) {
+        /* The guest just re-drove a column bank in its scan
+         * direction: update the scan witnesses for held-back
+         * releases (see brain_kbd_scan_witness()).  The guest
+         * scans in bursts a few ms wide separated by idle gaps
+         * of tens of ms; a drive notify after an idle gap starts
+         * a new sweep (epoch). */
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+        if (now - s->scan_last_notify_ns >
+            BRAIN_KBD_SCAN_SWEEP_GAP_MS * SCALE_MS) {
+            s->scan_epoch++;
+        }
+        s->scan_last_notify_ns = now;
+        brain_kbd_scan_witness(s);
     }
 }
 
@@ -624,6 +678,238 @@ static void brain_kbd_release_entry(BrainKbdState *s, unsigned int key)
     }
     s->active[key].flags = 0;
     brain_kbd_recalc(s);
+}
+
+/*
+ * Scan-witnessed release in the Brainux/Linux scan direction (see
+ * the file header): while the guest drives the columns, a latched
+ * key's release is held back until the guest's scan has driven the
+ * key's column low with the contact closed and moved on, or until
+ * BRAIN_KBD_SCAN_HOLD_MAX_MS of wall time has passed since the
+ * press.  The guest reads the rows while it holds a column low,
+ * so a witnessed pass means the press was on the rows it sampled.
+ * One witnessed sweep is not enough, though: the guest's poll
+ * debounce accepts a key only if it is still present at the next
+ * sweep, so the release additionally waits for a witness in a
+ * later sweep (scan_seen2) before the scan moves past the column.
+ * The release lands as soon as that second witnessing sweep moves
+ * on, so the hold the guest sees stays short no matter how long
+ * the press waited; the cap only keeps a guest that stops
+ * scanning from wedging the contact.
+ *
+ * Presses are serialized the same way: a key that goes down while
+ * an earlier press is still unwitnessed waits in a queue and only
+ * closes its contact once the earlier press has been seen.  If
+ * several presses were closed at once, a slow sweep would report
+ * them in column order rather than in the order the user typed
+ * them; queued, they land one per sweep, in host order.
+ */
+#define BRAIN_KBD_SCAN_HOLD_MAX_MS 2000
+
+/* Arm the scan timer for the earliest pending release's cap.
+ * Ripe releases (see below) wait for the guest's next drive
+ * change instead, so they do not re-arm the timer. */
+static void brain_kbd_scan_schedule(BrainKbdState *s)
+{
+    uint64_t next = UINT64_MAX;
+    unsigned int i;
+
+    for (i = 0; i < KEY_CNT; i++) {
+        if (s->scan_pending[i] && !s->scan_ripe[i]) {
+            next = MIN(next, s->scan_down_ns[i] +
+                       BRAIN_KBD_SCAN_HOLD_MAX_MS * SCALE_MS);
+            if (s->scan_seen2[i]) {
+                next = MIN(next, s->scan_release_at[i]);
+            }
+        }
+        if (s->scan_defer[i] && !s->scan_seen[i] && s->scan_qcount > 0) {
+            /* A queued press waits on this key's witness: keep a
+             * deadline so the queue drains even if the guest stops
+             * scanning while the key is still held. */
+            next = MIN(next, s->scan_down_ns[i] +
+                       BRAIN_KBD_SCAN_HOLD_MAX_MS * SCALE_MS);
+        }
+    }
+    if (next == UINT64_MAX) {
+        timer_del(s->scan_timer);
+    } else {
+        timer_mod(s->scan_timer, next);
+    }
+}
+
+/* Perform one key's held-back release. */
+static void brain_kbd_scan_release(BrainKbdState *s, unsigned int key)
+{
+    s->scan_defer[key] = false;
+    s->scan_seen[key] = false;
+    s->scan_pending[key] = false;
+    s->scan_ripe[key] = false;
+    s->scan_seen2[key] = false;
+    s->scan_release_at[key] = 0;
+    s->scan_pass[key] = false;
+    brain_kbd_release_entry(s, key);
+}
+
+/*
+ * Is any latched press still waiting for its first witness?  While
+ * one is, later presses queue behind it (see the block comment
+ * above), so the guest can only ever meet one unwitnessed press
+ * at a time and reports them in host order.
+ */
+static bool brain_kbd_scan_slot_busy(BrainKbdState *s)
+{
+    unsigned int i;
+
+    for (i = 0; i < KEY_CNT; i++) {
+        if ((s->scan_defer[i] || s->scan_pending[i]) &&
+            !s->scan_seen[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Close the queued head's contact once no earlier press is still
+ * unwitnessed.  A queued key whose host key-up already arrived
+ * lands in the just-released state, so its release follows the
+ * same witness rules as any other tap.
+ */
+static void brain_kbd_scan_land(BrainKbdState *s)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int key;
+
+    while (s->scan_qcount > 0 && !brain_kbd_scan_slot_busy(s)) {
+        key = s->scan_queue[0];
+        memmove(&s->scan_queue[0], &s->scan_queue[1],
+                sizeof(s->scan_queue[0]) * (s->scan_qcount - 1));
+        s->scan_qcount--;
+        s->scan_queued[key] = false;
+        brain_kbd_apply(s, &s->active[key], true);
+        s->scan_seen[key] = false;
+        s->scan_seen2[key] = false;
+        s->scan_release_at[key] = 0;
+        s->scan_pass[key] = false;
+        s->scan_ripe[key] = false;
+        s->scan_down_ns[key] = now;
+        if (s->scan_qrelease[key]) {
+            s->scan_qrelease[key] = false;
+            s->scan_defer[key] = false;
+            s->scan_pending[key] = true;
+        } else {
+            s->scan_defer[key] = true;
+            s->scan_pending[key] = false;
+        }
+        brain_kbd_recalc(s);
+    }
+}
+
+/*
+ * Observe the guest's column drive (called from the PINCTRL
+ * output hook whenever a bank is re-driven in the guest's scan
+ * direction, and from the scan timer): record that a latched
+ * key's column was driven low, and perform every pending release
+ * whose column the scan has since passed, or whose hold cap has
+ * expired.
+ *
+ * A pending release whose cap expires while its column is still
+ * low is only marked ripe, not performed: the guest drives a
+ * column low before it reads the rows, so opening the contact at
+ * the very observation that finds the column low could still
+ * beat the guest's read of this pass.  The next drive change
+ * proves the guest has executed past that read, and the ripe
+ * release lands there.
+ */
+static void brain_kbd_scan_witness(BrainKbdState *s)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    unsigned int i;
+
+    for (i = 0; i < KEY_CNT; i++) {
+        int col;
+
+        if ((!s->scan_defer[i] && !s->scan_pending[i]) ||
+            s->active[i].flags == 0) {
+            continue;
+        }
+        col = s->active[i].col;
+        if (s->scan_seen2[i] && !brain_kbd_col_low(s, col)) {
+            /* The sweep is on this key's column: remember the
+             * confirming pass so its end can release the key. */
+            s->scan_pass[i] = true;
+        }
+        if (s->scan_defer[i] && !s->scan_seen[i] &&
+            s->scan_qcount > 0 &&
+            now >= s->scan_down_ns[i] +
+                   BRAIN_KBD_SCAN_HOLD_MAX_MS * SCALE_MS) {
+            /* Still unwitnessed a full cap after the press while
+             * later presses queue behind it and the guest shows no
+             * sign of scanning: give the press up so the queue can
+             * drain (the matching key-up becomes a no-op). */
+            brain_kbd_scan_release(s, i);
+        } else if (s->scan_pending[i] && s->scan_ripe[i]) {
+            brain_kbd_scan_release(s, i);
+        } else if (s->scan_pending[i] && s->scan_seen2[i] &&
+                   s->scan_pass[i] && brain_kbd_col_low(s, col)) {
+            /* The confirming pass just ended (the scan moved off
+             * the key's column): release now rather than waiting
+             * out the grace, so the reported hold stays short. */
+            brain_kbd_scan_release(s, i);
+        } else if (s->scan_pending[i] && s->scan_seen2[i] &&
+                   now >= s->scan_release_at[i]) {
+            /* Confirmed by a second sweep and the grace has run
+             * out: release regardless of the drive state at this
+             * notify (the timer also lands here). */
+            brain_kbd_scan_release(s, i);
+        } else if (brain_kbd_col_low(s, col)) {
+            if (!s->scan_seen[i]) {
+                s->scan_seen[i] = true;
+                s->scan_seen_epoch[i] = s->scan_epoch;
+            } else if (s->scan_epoch > s->scan_seen_epoch[i] &&
+                       !s->scan_seen2[i]) {
+                /* Witnessed again in a later sweep: the guest's
+                 * debounce can now accept the key. */
+                s->scan_seen2[i] = true;
+                s->scan_seen2_epoch[i] = s->scan_epoch;
+                s->scan_release_at[i] = now +
+                    BRAIN_KBD_SCAN_CONFIRM_GRACE_MS * SCALE_MS;
+            }
+            if (s->scan_pending[i] &&
+                now >= s->scan_down_ns[i] +
+                       BRAIN_KBD_SCAN_HOLD_MAX_MS * SCALE_MS) {
+                s->scan_ripe[i] = true;
+            }
+        } else {
+            /* The scan is passing this key's column right now in
+             * a later sweep than the first witness: that pass is
+             * the second witness (the guest reads the rows during
+             * it, and the grace release follows just after). */
+            if (s->scan_seen[i] && !s->scan_seen2[i] &&
+                s->scan_epoch > s->scan_seen_epoch[i]) {
+                s->scan_seen2[i] = true;
+                s->scan_seen2_epoch[i] = s->scan_epoch;
+                s->scan_release_at[i] = now +
+                    BRAIN_KBD_SCAN_CONFIRM_GRACE_MS * SCALE_MS;
+            }
+            if (s->scan_pending[i] &&
+                now >= s->scan_down_ns[i] +
+                       BRAIN_KBD_SCAN_HOLD_MAX_MS * SCALE_MS) {
+                brain_kbd_scan_release(s, i);
+            }
+        }
+    }
+    brain_kbd_scan_land(s);
+    brain_kbd_scan_schedule(s);
+}
+
+static void brain_kbd_scan_cb(void *opaque)
+{
+    BrainKbdState *s = opaque;
+
+    if (brain_kbd_columns_driven(s)) {
+        brain_kbd_scan_witness(s);
+    }
 }
 
 /* Arm the chord timer for the next pending landing or release. */
@@ -805,10 +1091,53 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         if (s->chord_release_at[key]) {
             return;                 /* release already deferred */
         }
+        if (s->scan_queued[key]) {
+            /*
+             * Still queued behind an unwitnessed press: remember
+             * the release; it takes effect through the witness
+             * rules once the press lands, so the guest sees the
+             * whole tap even if it was shorter than the wait.
+             */
+            s->scan_qrelease[key] = true;
+            return;
+        }
+        if (s->scan_defer[key]) {
+            /*
+             * Brainux scan direction: hold the release back until
+             * the guest's scan has witnessed the press (see
+             * brain_kbd_scan_witness()), unless it already has and
+             * has moved past the key's column.
+             */
+            s->scan_defer[key] = false;
+            if (s->scan_seen2[key] &&
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME) >=
+                    s->scan_release_at[key]) {
+                brain_kbd_release_entry(s, key);
+                brain_kbd_scan_land(s);
+                brain_kbd_scan_schedule(s);
+            } else {
+                s->scan_pending[key] = true;
+                brain_kbd_scan_schedule(s);
+            }
+            return;
+        }
         brain_kbd_release_entry(s, key);
         return;
     }
 
+    if (s->scan_pending[key]) {
+        /*
+         * The same host key went down again while its previous
+         * release was still held back for the guest's scan
+         * witness: flush that release now, so this press starts
+         * from an open contact.  (Presses that fall inside one
+         * guest scan sweep merge into one, exactly as they do on
+         * the physical matrix.)
+         */
+        brain_kbd_scan_release(s, key);
+        brain_kbd_scan_land(s);
+        brain_kbd_scan_schedule(s);
+    }
     if (s->active[key].flags != 0) {
         return;                     /* autorepeat: already latched */
     }
@@ -854,8 +1183,36 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         s->chord_queue[s->chord_qcount++] = key;
         s->chord_down_ns[key] = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         brain_kbd_chord_schedule(s);
+    } else if (brain_kbd_columns_driven(s) &&
+               (s->scan_qcount > 0 || brain_kbd_scan_slot_busy(s))) {
+        /*
+         * Brainux scan direction: an earlier press is still
+         * unwitnessed (or others are already queued): queue this
+         * press behind them so the guest meets the keys in host
+         * order, one unwitnessed press at a time.  The entry is
+         * already latched in s->active[]; brain_kbd_scan_land()
+         * closes its contacts when its turn comes.
+         */
+        s->scan_queued[key] = true;
+        s->scan_queue[s->scan_qcount++] = key;
+        brain_kbd_scan_schedule(s);
     } else {
         brain_kbd_apply(s, e, true);
+        if (brain_kbd_columns_driven(s)) {
+            /*
+             * Brainux scan direction: arm the scan-witnessed
+             * release for this press (see brain_kbd_scan_witness()).
+             */
+            s->scan_defer[key] = true;
+            s->scan_seen[key] = false;
+            s->scan_seen2[key] = false;
+            s->scan_release_at[key] = 0;
+            s->scan_pass[key] = false;
+            s->scan_pending[key] = false;
+            s->scan_ripe[key] = false;
+            s->scan_down_ns[key] =
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
     }
     brain_kbd_recalc(s);
 }
@@ -946,6 +1303,8 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
     s->chord_timer = timer_new_ns(QEMU_CLOCK_REALTIME,
                                   brain_kbd_chord_cb, s);
     s->chord_qcount = 0;
+    s->scan_timer = timer_new_ns(QEMU_CLOCK_REALTIME,
+                                 brain_kbd_scan_cb, s);
 
     hs = qemu_input_handler_register(dev, &brain_kbd_handler);
     (void)hs;    /* handler lives as long as the device */
@@ -973,6 +1332,25 @@ static void brain_kbd_reset(DeviceState *dev)
     memset(s->chord_base_deferred, 0, sizeof(s->chord_base_deferred));
     if (s->chord_timer) {
         timer_del(s->chord_timer);
+    }
+    memset(s->scan_down_ns, 0, sizeof(s->scan_down_ns));
+    memset(s->scan_defer, 0, sizeof(s->scan_defer));
+    memset(s->scan_seen, 0, sizeof(s->scan_seen));
+    memset(s->scan_pending, 0, sizeof(s->scan_pending));
+    memset(s->scan_ripe, 0, sizeof(s->scan_ripe));
+    s->scan_epoch = 0;
+    s->scan_last_notify_ns = 0;
+    memset(s->scan_seen_epoch, 0, sizeof(s->scan_seen_epoch));
+    memset(s->scan_seen2, 0, sizeof(s->scan_seen2));
+    memset(s->scan_seen2_epoch, 0, sizeof(s->scan_seen2_epoch));
+    memset(s->scan_release_at, 0, sizeof(s->scan_release_at));
+    memset(s->scan_pass, 0, sizeof(s->scan_pass));
+    memset(s->scan_queue, 0, sizeof(s->scan_queue));
+    s->scan_qcount = 0;
+    memset(s->scan_queued, 0, sizeof(s->scan_queued));
+    memset(s->scan_qrelease, 0, sizeof(s->scan_qrelease));
+    if (s->scan_timer) {
+        timer_del(s->scan_timer);
     }
     brain_kbd_recalc(s);
 }

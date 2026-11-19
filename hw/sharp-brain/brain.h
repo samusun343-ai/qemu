@@ -715,6 +715,53 @@ struct BrainKbdState {
     int8_t chord_qstate[KEY_CNT];
     bool chord_release_deferred[KEY_CNT];
     uint64_t chord_release_at[KEY_CNT];
+
+    /*
+     * Scan-witnessed release (Brainux/Linux scan direction, see
+     * brain-kbd.c): that guest polls the matrix, so a contact the
+     * host opens again before the guest's scan has swept its
+     * column is never observed -- the keystroke vanishes.  For a
+     * key latched while the guest drives the columns, the release
+     * is therefore held back until the guest has driven the key's
+     * column low with the contact closed and moved on (the scan
+     * provably read the rows in between), with a wall-clock cap
+     * for a guest that stops scanning.  scan_defer[] is armed at
+     * key-down, scan_seen[] records the witnessed column drive,
+     * scan_pending[] marks keys whose host key-up arrived before
+     * the witness, and scan_ripe[] marks capped releases that
+     * wait for the guest's next drive change.
+     *
+     * One witnessed sweep is not enough for the guest to accept a
+     * key: its poll debounce drops a press that is not still
+     * present at the next sweep.  scan_epoch counts the guest's
+     * sweeps (bursts of column drives separated by idle gaps),
+     * scan_seen_epoch[] records the sweep of a key's first
+     * witness, and scan_seen2[] records a witness in a later
+     * sweep; a held-back release requires the second witness.
+     */
+    QEMUTimer *scan_timer;
+    uint64_t scan_down_ns[KEY_CNT];
+    bool scan_defer[KEY_CNT];
+    bool scan_seen[KEY_CNT];
+    bool scan_pending[KEY_CNT];
+    bool scan_ripe[KEY_CNT];
+    uint32_t scan_epoch;
+    uint64_t scan_last_notify_ns;
+    uint32_t scan_seen_epoch[KEY_CNT];
+    bool scan_seen2[KEY_CNT];
+    uint32_t scan_seen2_epoch[KEY_CNT];
+    uint64_t scan_release_at[KEY_CNT];
+    bool scan_pass[KEY_CNT];
+    /*
+     * Presses that arrive while an earlier press is still
+     * unwitnessed wait in scan_queue[] (scan_queued[]) so the
+     * guest meets them strictly in host order; scan_qrelease[]
+     * remembers a queued key whose host key-up already arrived.
+     */
+    int scan_queue[KEY_CNT];
+    int scan_qcount;
+    bool scan_queued[KEY_CNT];
+    bool scan_qrelease[KEY_CNT];
 };
 
 /* boot ROM emulation (hw/sharp-brain/bootrom.c) */
