@@ -453,6 +453,10 @@ struct MxsSaifState {
     /* virtual time at which the next RX sample becomes available */
     int64_t rx_next_ns;
 
+    /* virtual time through which the TX stream has been drained
+     * (by the backend or by the serial-clock drop in saif.c) */
+    int64_t tx_played_ns;
+
     AudioBackend *audio_be;
     SWVoiceOut *voice;
     QEMUTimer *timer;

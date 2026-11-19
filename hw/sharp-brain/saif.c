@@ -69,6 +69,19 @@
  *     drain time (mxs_dma_pace), which spreads the driver's
  *     completion IRQs and refills over time like hardware.
  *     Overflow is dropped, not back-pressured.
+ *   - The FIFO also drains by the serial clock, not only by
+ *     backend consumption (found in p40 by register/PC sampling
+ *     of a wedged guest): on hardware the port clocks samples out
+ *     whenever RUN is set, whether or not anything downstream
+ *     takes them, so BUSY always clears within a FIFO-depth of
+ *     the last feed.  A model that drains only into the backend
+ *     deadlocks the driver's stop spin (BUSY stuck at 1) whenever
+ *     the backend stops accepting bytes — which the shared-voice
+ *     wav backend does after a record session activates the
+ *     sibling port's voice.  The pacing tick therefore drops the
+ *     oldest samples whose playout time has passed without the
+ *     backend taking them (an underrun on hardware), keeping the
+ *     FIFO bounded by time rather than by the listener.
  *   - RX (record) DMA reads back silence.  The bundled Voice Memo
  *     app exercises the record path (see the STAT note above).
  */
@@ -122,12 +135,13 @@ static bool saif_running(MxsSaifState *s)
            !(s->ctrl & (SAIF_CTRL_SFTRST | SAIF_CTRL_CLKGATE));
 }
 
-static void saif_flush(MxsSaifState *s)
+static uint32_t saif_flush(MxsSaifState *s)
 {
     uint8_t buf[4096];
+    uint32_t total = 0;
 
     if (!s->voice || !saif_running(s)) {
-        return;
+        return 0;
     }
     while (!fifo8_is_empty(&s->tx_fifo)) {
         uint32_t n = fifo8_num_used(&s->tx_fifo);
@@ -141,10 +155,12 @@ static void saif_flush(MxsSaifState *s)
         memcpy(buf, p, n);
         written = audio_be_write(s->audio_be, s->voice, buf, n);
         fifo8_drop(&s->tx_fifo, (uint32_t)MIN(written, (size_t)n));
+        total += (uint32_t)MIN(written, (size_t)n);
         if (written < n) {
             break;   /* backend full: keep the rest queued */
         }
     }
+    return total;
 }
 
 static void saif_audio_cb(void *opaque, int avail)
@@ -186,9 +202,41 @@ static void saif_timer_cb(void *opaque)
         if (s->dma) {
             mxs_dma_pace(s->dma, s->dma_ch, 1);
         }
-        saif_flush(s);
+        /*
+         * Drain by the serial clock as well as by the backend:
+         * samples whose playout time has passed but that the
+         * backend did not take are dropped (hardware underrun),
+         * so the TX FIFO empties within a bounded time after the
+         * guest stops feeding it and STAT.BUSY can always clear
+         * for the driver's stop spin, on any backend.
+         */
+        {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            uint32_t flushed = saif_flush(s);
+
+            if (s->tx_played_ns == 0) {
+                s->tx_played_ns = now;
+            } else {
+                uint64_t due = (uint64_t)(now - s->tx_played_ns) /
+                               SAIF_FRAME_NS * SAIF_FRAME_BYTES;
+
+                if (due > flushed) {
+                    uint32_t drop = MIN(due - flushed,
+                                        fifo8_num_used(&s->tx_fifo));
+
+                    drop &= ~(SAIF_FRAME_BYTES - 1);
+                    if (drop) {
+                        fifo8_drop(&s->tx_fifo, drop);
+                        s->dropped += drop;
+                    }
+                }
+                s->tx_played_ns = now;
+            }
+        }
         timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                   saif_pace_interval(s));
+    } else {
+        s->tx_played_ns = 0;
     }
 }
 
@@ -199,6 +247,9 @@ static void saif_maybe_start(MxsSaifState *s)
     }
     if (s->voice) {
         audio_be_set_active_out(s->audio_be, s->voice, true);
+    }
+    if (s->tx_played_ns == 0) {
+        s->tx_played_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     }
     timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               saif_pace_interval(s));
@@ -389,6 +440,7 @@ static void saif_reset(DeviceState *dev)
     s->stat = 0;
     s->dropped = 0;
     s->rx_next_ns = 0;
+    s->tx_played_ns = 0;
     fifo8_reset(&s->tx_fifo);
     if (s->voice) {
         audio_be_set_active_out(s->audio_be, s->voice, false);
