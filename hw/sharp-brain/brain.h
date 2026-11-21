@@ -505,6 +505,10 @@ struct MxsLradcState {
 
     /* microSD slot card-detect level (LRADC channel 5) */
     bool sd_card_present;
+    /* Live card-detect source: the SSP1 SDBus.  When set, channel 5
+     * follows sdbus_get_inserted() so runtime media changes (eject /
+     * change-medium / device hotplug) produce a real detect edge. */
+    SDBus *sd_bus;
     uint32_t conversion;
     uint32_t threshold[2];
     uint32_t debug1;

@@ -232,7 +232,9 @@ static uint32_t lradc_sample(MxsLradcState *s, int ch)
         return 0;             /* eMMC: always present */
     }
     if (ch == 5) {
-        return s->sd_card_present ? 0 : 4095;
+        bool present = s->sd_bus ? sdbus_get_inserted(s->sd_bus)
+                                 : s->sd_card_present;
+        return present ? 0 : 4095;
     }
     return 0;
 }

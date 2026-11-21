@@ -61,6 +61,14 @@ static void brain_init(MachineState *machine)
     qdev_realize(DEVICE(&s->soc), NULL, &error_fatal);
 
     /*
+     * Card-detect wiring: LRADC channel 5 (read by the BSP's
+     * BSPSDHCIsCardPresent()) follows the SSP1 SDBus insertion state
+     * live, so a runtime media change looks like a physical card
+     * removal/insertion to the guest instead of a boot-time constant.
+     */
+    MXS_LRADC(s->soc.lradc)->sd_bus = &MXS_SSP(s->soc.ssp[1])->sdbus;
+
+    /*
      * Board straps, read through PINCTRL DIN0 (EBOOT maps the PINCTRL
      * block at VA 0xb0000000 and reads "capability bits" as DIN0 bits):
      *
