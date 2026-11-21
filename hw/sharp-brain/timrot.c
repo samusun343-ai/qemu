@@ -203,13 +203,25 @@ static void timrot_arm(MxsTimrotState *s, int n)
          * IRQ-entry latency before the read) can exceed the tick
          * interval: the written MATCH is then already in the past
          * and the wrap-aware delta becomes a ~300 s wait, during
-         * which the guest sits in WFI.  The same stall was observed
-         * with MATCH values a whole 0x60000000 above the true
-         * count (the guest intermittently reads a stale count).
-         * A wait longer than half the 32-bit range (>179 s) is
-         * never the guest's intent here, so clamp it to one
-         * minimum tick (1 ms): the ISR then runs, reads a fresh
-         * count and reprograms MATCH correctly.
+         * which the guest sits in WFI.
+         *
+         * The same distortion also appears in the opposite
+         * direction (p81): the guest intermittently writes MATCH
+         * a whole 0x60000000 counts (134 s at 12 MHz) BELOW its
+         * own just-read count, arming a +134 s wait that the old
+         * past-only clamp let through.  Such arms are harmless
+         * while the guest keeps reprogramming MATCH (an active
+         * system does so every tick), but when one lands as the
+         * last write before a quiet window the whole guest
+         * sleeps until it expires (p57 E4).  Across 296k arms
+         * logged in p54-E6 the guest's legitimate waits are only
+         * 1 ms and ~100 ms (idle tick); no arm falls between
+         * 500 ms and 10 s.  A wait longer than 1 s is therefore
+         * never the guest's intent here, so clamp any such wait
+         * to one minimum tick (1 ms): the ISR then runs, reads a
+         * fresh count and reprograms MATCH correctly.  The
+         * counter read path is unchanged; only the arming
+         * deadline is clamped.
          */
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
@@ -219,8 +231,9 @@ static void timrot_arm(MxsTimrotState *s, int n)
 
         if (delta == 0) {
             delta = 0xffffffffu;
-        } else if (delta > 0x80000000u) {
-            /* match already in the past (stale guest read) */
+        }
+        if ((uint64_t)delta * (uint64_t)nspt > 1000000000ULL) {
+            /* wait over 1 s: never the guest's intent here */
             uint64_t freq = timrot_freq(ctrl);
             delta = freq ? (uint32_t)(freq / 1000) : 1;
             if (delta == 0) {
