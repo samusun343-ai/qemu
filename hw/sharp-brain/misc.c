@@ -42,6 +42,10 @@ typedef struct MxsMiscState {
     uint32_t regs[0x2000 / 16];
     uint8_t kind;               /* which block */
     uint8_t ctrl_idx;           /* register slot holding SFTRST/CLKGATE */
+    /* POWER block only (p84): RTC sibling + stay-off power-down state */
+    DeviceState *rtc;
+    bool pwd_stay_off;
+    Notifier wakeup_notifier;
 } MxsMiscState;
 
 /*
@@ -52,6 +56,29 @@ typedef struct MxsMiscState {
 static inline MxsMiscState *MISC_OF(void *obj)
 {
     return (MxsMiscState *)obj;
+}
+
+void mxs_power_set_rtc(DeviceState *power, DeviceState *rtc)
+{
+    MISC_OF(power)->rtc = rtc;
+}
+
+/*
+ * Host wake request (QMP system_wakeup) while the chip is powered
+ * down: on hardware this is the power key, which starts a full
+ * power-on cycle through the boot ROM.  Guest DRAM survives a QEMU
+ * reset, so the ROM/EBOOT resume chain finds the parked resume info
+ * exactly as it does after the AUTO_RESTART power cycle.
+ */
+static void mxs_power_wakeup_notify(Notifier *notifier, void *data)
+{
+    MxsMiscState *s = container_of(notifier, MxsMiscState,
+                                   wakeup_notifier);
+
+    if (s->pwd_stay_off) {
+        s->pwd_stay_off = false;
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
 }
 
 #define KIND_DIGCTL   0
@@ -82,19 +109,25 @@ static inline MxsMiscState *MISC_OF(void *obj)
  *   bit  0      PWD     - power-down request
  *
  * The WinCE suspend trampoline (copied to IRAM by VMC_PowerDown)
- * writes UNLOCK + PWD as the final step of suspend-to-RAM.  On real
- * hardware with 5V present the chip powers down and then powers
- * itself back on automatically (NXP: "The MX28 does not power off if
- * you have 5V"); the ROM re-runs the boot chain and EBOOT's
- * CheckResumeInfo finds the kernel's saved resume state still in
- * (self-refreshed) DRAM, jumping straight to the resume vector.
+ * writes UNLOCK + PWD as the final step of suspend-to-RAM.  What the
+ * chip does next is governed by RTC PERSISTENT0.AUTO_RESTART
+ * (IMX28RM §22.8.7): set, the chip powers itself back on ~180 ms
+ * after powering down (an internal pull-up holds PSWITCH at its
+ * mid level); clear, it stays off until the power key is pressed.
+ * With 5V present the board likewise auto-powers (NXP: "The MX28
+ * does not power off if you have 5V"), but the Brain is a battery
+ * device and its CE power driver clears AUTO_RESTART on the suspend
+ * path before writing PWD (measured at the register, p84), so the
+ * stay-off case is the one this guest exercises.
  *
- * POWER_STS models 5V as present, so model PWD as that automatic
- * power cycle: request a guest reset, which re-runs the boot ROM /
- * EBOOT / resume chain.  Guest DRAM is not cleared on reset, exactly
- * like the self-refreshed DRAM on hardware.  PWD_OFF powers the
- * device off for real, which for a VM means shutting the emulator
- * down.
+ * Model both: AUTO_RESTART set -> request a guest reset, which
+ * re-runs the boot ROM / EBOOT / resume chain (guest DRAM is not
+ * cleared on reset, exactly like the self-refreshed DRAM on
+ * hardware, so CheckResumeInfo finds the parked resume state).
+ * AUTO_RESTART clear -> suspend the VM and stay off; a host wake
+ * request (QMP system_wakeup, the power key) runs the same reset
+ * through the wakeup notifier.  PWD_OFF powers the device off for
+ * real, which for a VM means shutting the emulator down.
  */
 #define POWER_RESET_UNLOCK_KEY       0x3e770000u
 #define POWER_RESET_FASTFALL_PSWITCH_OFF  (1u << 2)
@@ -702,8 +735,24 @@ static void mxs_misc_write(void *opaque, hwaddr addr, uint64_t value,
 
         if ((v & 0xffff0000u) == POWER_RESET_UNLOCK_KEY) {
             if (v & POWER_RESET_PWD) {
-                /* 5V present: power down + automatic power-on = reset */
-                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+                if (s->rtc && !mxs_rtc_auto_restart(s->rtc)) {
+                    /*
+                     * AUTO_RESTART clear: the guest powered down to
+                     * stay off (battery operation; the CE power
+                     * driver clears the bit on the suspend path,
+                     * measured p84).  Suspend the VM with the chip
+                     * off; a host wake request powers it back on via
+                     * the wakeup notifier above.
+                     */
+                    s->pwd_stay_off = true;
+                    qemu_system_suspend_request();
+                } else {
+                    /*
+                     * AUTO_RESTART armed: power down + automatic
+                     * power-on (~180 ms on hardware) = reset.
+                     */
+                    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+                }
             } else if (v & POWER_RESET_PWD_OFF) {
                 qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
             }
@@ -889,6 +938,7 @@ static void mxs_misc_reset(DeviceState *dev)
     MxsMiscState *s = MISC_OF(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    s->pwd_stay_off = false;
 
     if (s->kind == KIND_CLKCTRL) {
         for (unsigned i = 0; i < ARRAY_SIZE(clkctrl_reset); i++) {
@@ -938,6 +988,13 @@ static void mxs_misc_init(Object *obj)
         s->kind = KIND_PXP;
     } else {
         s->kind = KIND_EMI;
+    }
+
+    if (s->kind == KIND_POWER) {
+        s->wakeup_notifier.notify = mxs_power_wakeup_notify;
+        qemu_register_wakeup_notifier(&s->wakeup_notifier);
+        /* this block is the platform's power key / PM device */
+        qemu_register_wakeup_support();
     }
 
     memory_region_init_io(&s->iomem, obj, &mxs_misc_ops, s,

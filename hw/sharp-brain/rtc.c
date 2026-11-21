@@ -111,6 +111,20 @@ typedef struct MxsRtcState {
     bool powered;              /* time base anchored (always-on domain)  */
 } MxsRtcState;
 
+/*
+ * Read by the POWER block (misc.c) when the guest requests power-down:
+ * whether PERSISTENT0.AUTO_RESTART is armed.  The CE boot chain arms
+ * it during init; the CE power driver clears it on the suspend path
+ * (measured, p84), so a set bit at PWD time means the guest asked for
+ * the hardware's automatic power-up, a clear bit means stay off.
+ */
+bool mxs_rtc_auto_restart(DeviceState *dev)
+{
+    MxsRtcState *s = MXS_RTC(dev);
+
+    return s->persistent[0] & BM_RTC_PERSISTENT0_AUTO_RESTART;
+}
+
 /* REG/SET/CLR/TOG alias write, shared by the register blocks below */
 static void rtc_alias_write(uint32_t *reg, uint32_t off, uint32_t value)
 {

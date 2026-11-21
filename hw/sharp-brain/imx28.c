@@ -519,6 +519,8 @@ static void imx28_init(Object *obj)
     object_property_add_child(obj, "emi", OBJECT(s->emi));
     s->rtc = qdev_new(TYPE_MXS_RTC);
     object_property_add_child(obj, "rtc", OBJECT(s->rtc));
+    /* POWER reads PERSISTENT0.AUTO_RESTART at power-down (p84) */
+    mxs_power_set_rtc(s->power, s->rtc);
 
     s->pwm = qdev_new(TYPE_MXS_PWM);
     object_property_add_child(obj, "pwm", OBJECT(s->pwm));

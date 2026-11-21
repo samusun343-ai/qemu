@@ -385,6 +385,10 @@ int mxs_lcdif_dma_data(struct MxsLcdifPriv *s, bool to_device,
 #define TYPE_MXS_SAIF "mxs-saif"
 #define TYPE_MXS_PXP "mxs-pxp"
 #define TYPE_MXS_USB_OTG "mxs-usb-otg"
+
+/* POWER block power-down semantics (misc.c / rtc.c, p84) */
+bool mxs_rtc_auto_restart(DeviceState *dev);
+void mxs_power_set_rtc(DeviceState *power, DeviceState *rtc);
 #define TYPE_BU26154 "bu26154"
 
 /* ROHM BU26154 audio codec: I2C slave address 0x1A (7-bit, SAD pin
