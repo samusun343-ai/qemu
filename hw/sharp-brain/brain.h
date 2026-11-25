@@ -397,6 +397,19 @@ void mxs_power_set_rtc(DeviceState *power, DeviceState *rtc);
  * i2c@80058000). */
 #define BU26154_I2C_ADDR 0x1a
 
+#define TYPE_SX8650 "sx8650"
+
+/* Semtech SX8650 resistive touch-screen controller: I2C slave
+ * address 0x48 (7-bit, A0 pin = GND; 0x49 if A0 = VDD), on the
+ * I2C bus at 0x80058000 (brainux imx28-brain.dtsi places the
+ * sx8650 node under i2c@80058000; the guest PDD
+ * sx8650_touchscreen.dll reaches the bus as "I2C1:").  Its NIRQ
+ * output is wired to GPIO3_1 (the sx8650 node's interrupts are
+ * <1 IRQ_TYPE_EDGE_FALLING> under &gpio3). */
+#define SX8650_I2C_ADDR 0x48
+#define SX8650_NIRQ_GPIO_BANK 3
+#define SX8650_NIRQ_GPIO_PIN 1
+
 /* ------------------------------------------------------------------ */
 /* I2C (hw/sharp-brain/i2c.c)                                         */
 

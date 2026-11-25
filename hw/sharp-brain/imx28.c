@@ -389,6 +389,26 @@ static void imx28_realize(DeviceState *dev, Error **errp)
     i2c_slave_create_simple(MXS_I2C(s->i2c[0])->bus, TYPE_BU26154,
                             BU26154_I2C_ADDR);
 
+    /*
+     * Semtech SX8650 touch-screen controller on the I2C bus at
+     * 0x80058000 (board wiring per brainux imx28-brain.dtsi: the
+     * sx8650 node sits under i2c@80058000; the guest PDD reaches
+     * the bus through its "I2C1:" driver instance, the same one
+     * that serves the codec above).  Its NIRQ output drives
+     * GPIO3_1 through the pinctrl, wired inside the model
+     * (sx8650.c).
+     */
+    {
+        I2CSlave *ts = i2c_slave_new(TYPE_SX8650, SX8650_I2C_ADDR);
+
+        object_property_set_link(OBJECT(ts), "pinctrl",
+                                 OBJECT(s->pinctrl), &error_fatal);
+        if (!i2c_slave_realize_and_unref(ts, MXS_I2C(s->i2c[0])->bus,
+                                         errp)) {
+            return;
+        }
+    }
+
     /* LRADC (ADC + 4-wire touch) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->lradc), errp)) {
         return;
