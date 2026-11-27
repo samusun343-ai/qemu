@@ -530,7 +530,20 @@ struct MxsLradcState {
     bool touch_down;
     int x, y;                    /* 0..max */
     uint32_t x_max, y_max;
+    struct QemuInputHandlerState *input_hs;
 };
+
+/*
+ * Make the LRADC touchscreen the default (front-of-list) pointer
+ * handler.  The SX8650 model registers its handler first, and the
+ * input core delivers each pointer event to the first matching
+ * handler only, so without this the LRADC panel -- the path the
+ * WinCE guest actually reads -- never sees a pointer event unless
+ * the monitor issues mouse_set.  Activation changes only the
+ * default routing: handler IDs (and thus the meaning of
+ * "mouse_set 1/2") are registration order and stay as they were.
+ */
+void mxs_lradc_activate_input(DeviceState *dev);
 
 /* public: inject external GPIO input levels (keyboard, card detect) */
 void mxs_pinctrl_set_input(DeviceState *dev, int bank, uint32_t mask,

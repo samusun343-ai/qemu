@@ -53,18 +53,27 @@
  *     keys can hold one contact (both Shifts, the symbols layer).
  *     Ctrl/Shift state is tracked per key so frontend autorepeat
  *     cannot inflate it.
- *   - Chord timing: the WinCE keyboard driver folds the symbols
- *     layer only when the 記号 contact has been latched as a
- *     modifier well before the base key's press edge -- which is
- *     what a human typist produces, since the modifier finger
- *     lands first.  A chord whose contacts all close in the same
- *     scan is reported as two independent key presses (the base
- *     key plus a bare 記号 press, which e.g. the dictionary
- *     search field turns into its "~" wildcard: "<char>~" /
- *     "~<char>" pairs).  So while the guest scans in the WinCE
- *     direction, a symbols chord's base contact is queued until
- *     the guest has swept the matrix with the modifiers down and
- *     a minimum stagger has elapsed; keys pressed meanwhile queue
+ *   - Chord timing: whether a symbols chord folds into its glyph
+ *     is decided on the guest side, past the matrix: the driver
+ *     reports the 記号 and base contacts as a pair of key events
+ *     at every stagger tried (measured 0 ms -- both contacts in
+ *     one scan bitmap -- through 800 ms).  Fields that convert by
+ *     key state (the setup wizard's date field, the owner-info
+ *     PIN field, standard CE controls) fold the pair; the shell's
+ *     own search fields treat a bare 記号 press as a first-class
+ *     key -- it inserts the "~" blank-word wildcard, and "?" on a
+ *     second press -- and commit it as soon as its event is
+ *     processed, so in those fields a chord surfaces as "~" plus
+ *     the base letter at any stagger (the shell's help text and
+ *     its software keyboard, which carries dedicated "~" and "?"
+ *     keys and no digits, present 記号 exactly that way).  The
+ *     queue below therefore only has to reproduce a human chord:
+ *     while the guest scans in the WinCE direction, a symbols
+ *     chord's base contact is queued until the guest has swept
+ *     the matrix about twice with the modifiers down (a 90 ms
+ *     fallback covers a guest that is not sweeping), so the
+ *     driver sees the modifier latched before the base edge, as
+ *     with a typist's fingers; keys pressed meanwhile queue
  *     behind it in host order, and a release that arrives early
  *     takes effect just after the base lands, so the chord always
  *     completes whole.  The Brainux driver folds only same-scan
@@ -460,25 +469,24 @@ static void brain_kbd_recalc(BrainKbdState *s)
 
 /*
  * Symbols-chord timing in the WinCE scan direction (see
- * brain_kbd_event()): the guest's driver latches 記号 as a
- * modifier only once it has been down on its own for a while --
- * a base contact that lands in the same scan window, or even a
- * couple of sweeps later, is reported as two independent key
- * presses.  So a chord's base contact is held back until the
- * guest has swept the matrix about twice with the modifiers
+ * brain_kbd_event()): a chord's base contact is held back until
+ * the guest has swept the matrix about twice with the modifiers
  * down (counted from its row-drive activity, ~14 transitions
- * per sweep) AND at least BRAIN_KBD_CHORD_MIN_MS of wall time
- * has passed, with a wall-clock fallback for a guest that is
- * not scanning.  Counting guest scan activity as well as time
- * keeps the stagger correct under host load.  Queued keys land
- * in press order, BRAIN_KBD_CHORD_GAP_MS apart, and a key whose
- * host release arrived while it was queued is released
- * BRAIN_KBD_CHORD_RELEASE_MS after its base lands, so even a
- * tap faster than the latch time completes as a whole chord.
+ * per sweep), with a short wall-clock fallback for a guest that
+ * is not scanning.  That reproduces a human chord -- modifier
+ * latched, then the base edge -- at human scale (the earlier
+ * 200/300 ms constants made every digit cost a third of a
+ * second).  Whether the guest then folds the pair is the
+ * field's business, not the timing's (see the file header).
+ * Queued keys land in press order, BRAIN_KBD_CHORD_GAP_MS
+ * apart, and a key whose host release arrived while it was
+ * queued is released BRAIN_KBD_CHORD_RELEASE_MS after its base
+ * lands, so even a tap faster than the latch time completes as
+ * a whole chord.
  */
 #define BRAIN_KBD_CHORD_SCAN_TICKS 28
-#define BRAIN_KBD_CHORD_MIN_MS 200
-#define BRAIN_KBD_CHORD_FALLBACK_MS 300
+#define BRAIN_KBD_CHORD_MIN_MS 0
+#define BRAIN_KBD_CHORD_FALLBACK_MS 90
 #define BRAIN_KBD_CHORD_GAP_MS 40
 #define BRAIN_KBD_CHORD_RELEASE_MS 40
 
@@ -922,9 +930,22 @@ static void brain_kbd_chord_schedule(BrainKbdState *s)
         int key = s->chord_queue[0];
 
         if (s->chord_qstate[key] == 1) {
+            uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+            /*
+             * The scan-tick path re-runs the processor from the
+             * GPIO notify hook, so the timer only owes us the two
+             * wall-clock deadlines.  Once the minimum has passed
+             * without enough witnessed sweeps, the next deadline
+             * is the fallback alone: re-arming on the already-past
+             * minimum would refire the timer immediately for the
+             * whole wait, spinning the main loop.
+             */
             cand = s->chord_down_ns[key] +
                    BRAIN_KBD_CHORD_MIN_MS * SCALE_MS;
-            next = MIN(next, cand);
+            if (cand > now) {
+                next = MIN(next, cand);
+            }
             cand = s->chord_down_ns[key] +
                    BRAIN_KBD_CHORD_FALLBACK_MS * SCALE_MS;
             next = MIN(next, cand);
@@ -1156,11 +1177,11 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         /*
          * WinCE scan direction: land the modifier contacts now and
          * queue the base contact behind the chord stagger, the way
-         * a typist presses 記号 a moment before the base key.  If
-         * the contacts all landed in one scan the guest would
-         * report two independent key presses instead of the chord
-         * (see the file header).  In the Brainux scan direction
-         * the chord stays atomic, as that driver requires.
+         * a typist presses 記号 a moment before the base key, so
+         * the driver sees the modifier latched ahead of the base
+         * edge (see the file header).  In the Brainux scan
+         * direction the chord stays atomic, as that driver
+         * requires.
          */
         brain_kbd_apply_mods(s, e, true);
         s->chord_base_deferred[key] = true;

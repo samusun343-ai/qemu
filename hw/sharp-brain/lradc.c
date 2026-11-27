@@ -577,9 +577,16 @@ static void lradc_realize(DeviceState *dev, Error **errp)
     if (s->y_max == 0) {
         s->y_max = 479;
     }
-    QemuInputHandlerState *hs = qemu_input_handler_register(dev,
-                                                            &lradc_handler);
-    (void)hs;    /* handler lives as long as the device */
+    s->input_hs = qemu_input_handler_register(dev, &lradc_handler);
+}
+
+void mxs_lradc_activate_input(DeviceState *dev)
+{
+    MxsLradcState *s = MXS_LRADC(dev);
+
+    if (s->input_hs) {
+        qemu_input_handler_activate(s->input_hs);
+    }
 }
 
 static const Property lradc_properties[] = {

@@ -414,6 +414,17 @@ static void imx28_realize(DeviceState *dev, Error **errp)
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(s->lradc), 0, IMX28_LRADC_BASE);
+    /*
+     * The LRADC panel is the touch path the WinCE guest reads, but
+     * the SX8650 above registered its pointer handler first and the
+     * input core routes each event to the first matching handler
+     * only -- so by default every tap went to the SX8650 and the
+     * panel saw nothing (GUI frontends have no way to issue the
+     * monitor's mouse_set).  Make the LRADC the default pointer
+     * handler.  This does not renumber the handlers: "mouse_set 2"
+     * keeps selecting the LRADC, "mouse_set 1" the SX8650.
+     */
+    mxs_lradc_activate_input(s->lradc);
     {
         /* touch, thresh0/1, channel0..7, button0/1 */
         static const int lradc_irqs[MXS_LRADC_NUM_IRQ] = {
