@@ -646,15 +646,14 @@ typedef struct BrainKbdLayout {
     const BrainKeyDef *direct;  /* [KEY_CNT] host keys (US layout)   */
     const BrainKeyDef *combo;   /* [KEY_CNT] Ctrl+key combos         */
     /*
-     * Host-layout variants.  Host keycodes are positional, so keys
-     * whose printed glyph differs between a US and a JIS keyboard
-     * need different chords to produce the glyph printed on them:
+     * Host-layout variants (all NULL in the current layout: the
+     * punctuation chords that made positional keycodes differ
+     * between US and JIS hosts were removed, so both host layouts
+     * resolve through `direct` alone):
      *   jis_direct  - overrides merged over `direct` for JIS hosts
      *   jis_shifted - entries consulted for JIS hosts when a host
      *                 Shift key is held at key-down time
-     *   us_shifted  - same for US hosts (NULL when the plain table
-     *                 plus the passed-through Shift already yields
-     *                 every US shifted glyph)
+     *   us_shifted  - same for US hosts
      */
     const BrainKeyDef *jis_direct;
     const BrainKeyDef *jis_shifted;

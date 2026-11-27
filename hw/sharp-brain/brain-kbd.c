@@ -26,27 +26,51 @@
  *     SHARP's manuals call the "Escape key"), host Home closes the
  *     Brain Home contact, and host Delete is an alias for the Brain
  *     削除 (Backspace) contact.
- *   - Digits and punctuation only exist as the blue "symbols" legend
- *     of the QWERTY keys (記号 modifier + key); pressing them on the
- *     host holds the symbols contact plus the base key contact, which
- *     is exactly what typing them on the real device does.  Glyphs
- *     on the Shift+symbols layer (the US-shifted forms of the blue
- *     legends: ! @ # $ % ^ & * ( ) ~ + | : " { } < > ?) are reached
- *     by holding the symbols and Shift contacts together with the
- *     base key.
- *   - Host keycodes are positional: the same keycode is printed
- *     with a different glyph on a US and on a JIS keyboard (e.g.
- *     KEY_LEFTBRACE is "[" on US, "@" on JIS).  The "host-layout"
- *     property ("jis" by default -- the Brain is a Japanese-market
- *     device -- or "us") selects the chord table so that the glyph
- *     printed on the host key is the glyph the chord produces.
- *     Keys that only exist on JIS keyboards (Yen, Ro, Henkan,
- *     Muhenkan, Zenkakuhankaku, KatakanaHiragana) and the ISO
- *     102nd key have explicit assignments in both layouts.
+ *   - Digits only exist as the blue "symbols" legend of the QWERTY
+ *     keys (記号 modifier + key); pressing them on the host holds
+ *     the symbols contact plus the base key contact, which is
+ *     exactly what typing them on the real device does.  (On the
+ *     guest side the folding is done in software: keybd_EDNA2
+ *     reports the 記号 key as F12, which is not a modifier in the
+ *     layout's ToUnicode tables -- those only know Shift/Ctrl/Alt
+ *     -- and SHARP's own numeric fields, e.g. the setup wizard's
+ *     date field and the owner-info PIN field, read the 記号 state
+ *     themselves and interpret the letter as its blue digit.)
+ *     A held host Shift must not turn the digit chord into a
+ *     three-contact chord, so digit entries carry BRAIN_KEY_NOSHIFT:
+ *     Shift+1 on the host is the digit chord, never a "!" chord.
+ *   - Punctuation has no keys and no legends on the Brain at all,
+ *     and no chord of matrix contacts can produce it in the guest:
+ *     the only VKs the layout tables map to punctuation glyphs
+ *     (the OEM and digit VKs of a PC keyboard) have no physical
+ *     keys on this device, and 記号 is not a ToUnicode modifier
+ *     (see above).  Host keys whose glyph would need a symbols
+ *     chord other than the digits are therefore deliberately left
+ *     unassigned -- pressing them does nothing, exactly like the
+ *     F-keys.  The one punctuation glyph the device does type is
+ *     '_', the shifted form of its only punctuation key, Minus
+ *     (the guest layout maps VK_OEM_MINUS to '-'/'_'), and it is
+ *     reached the way the device reaches it: Shift+Minus.
+ *   - Host keycodes are positional, but with the punctuation chords
+ *     gone the only positional differences between US and JIS hosts
+ *     are gone too: both layouts resolve identically.  The
+ *     "host-layout" property ("jis" by default -- the Brain is a
+ *     Japanese-market device -- or "us") is still accepted for
+ *     compatibility.  Keys that only exist on JIS keyboards
+ *     (Henkan, Muhenkan, Zenkakuhankaku, KatakanaHiragana) and the
+ *     JIS Ro key (Shift+Minus, '_') keep their explicit assignments
+ *     in both layouts.
  *   - Brain-specific dictionary keys that have no PC equivalent
  *     (History, My辞書, 一覧, 国語, 音声, 英和, 記号,
  *     marker, search) are reached through Ctrl+letter combinations.
  *     戻る also has a combo (Ctrl+B) for keyboards without Esc.
+ *     Primary assignments only use keys every PC keyboard has
+ *     (letters, Ctrl, Shift, Esc, Enter, Space, Backspace, arrows):
+ *     keys that compact keyboards lack or hide behind Fn (Home,
+ *     Insert, PageUp/PageDown, the numpad, JIS-only keys) are kept
+ *     as aliases only -- Home is an alias for Ctrl+O, PageUp and
+ *     PageDown are aliases for Ctrl+P (previous page) and Ctrl+N
+ *     (next page), Insert for Ctrl+H, Delete for Backspace.
  *   - The mapping a key-down applies is latched per host key, so a
  *     key-up always releases the same contacts even if Ctrl was
  *     released first; contacts are refcounted because several host
@@ -207,63 +231,49 @@ static const BrainKeyDef pwsh6_direct[KEY_CNT] = {
     [KEY_INSERT]               = { 1, 2, D },   /* History (alias) */
 
     /*
-     * Digits and punctuation: the blue "symbols" legends.  記号 + base
-     * key, exactly like typing them on the real device.
+     * Digits: the blue "symbols" legends.  記号 + base key, exactly
+     * like typing them on the real device.  NOSHIFT keeps the chord
+     * to the two contacts a typist closes: a host Shift held at the
+     * same time must not add the Shift contact and turn the key
+     * into a three-contact chord for a glyph the device does not
+     * have (! @ # $ % ^ & * ( )).
+     *
+     * Every other punctuation key of a PC keyboard is deliberately
+     * absent here: the Brain has no such keys or legends, and no
+     * contact chord produces those glyphs in the guest (see the
+     * file header).  Unassigned host keys do nothing, like the
+     * F-keys.
      */
-    [KEY_1]                    = { 3, 5, S },   /* 記号+Q = 1 */
-    [KEY_2]                    = { 5, 5, S },   /* 記号+W = 2 */
-    [KEY_3]                    = { 1, 6, S },   /* 記号+E = 3 */
-    [KEY_4]                    = { 6, 2, S },   /* 記号+R = 4 */
-    [KEY_5]                    = { 4, 2, S },   /* 記号+T = 5 */
-    [KEY_6]                    = { 0, 2, S },   /* 記号+Y = 6 */
-    [KEY_7]                    = { 2, 2, S },   /* 記号+U = 7 */
-    [KEY_8]                    = { 3, 1, S },   /* 記号+I = 8 */
-    [KEY_9]                    = { 5, 1, S },   /* 記号+O = 9 */
-    [KEY_0]                    = { 5, 0, S },   /* 記号+P = 0 */
-    [KEY_GRAVE]                = { 0, 5, S },   /* 記号+D */
-    [KEY_EQUAL]                = { 1, 5, S },   /* 記号+F */
-    [KEY_BACKSLASH]            = { 4, 1, S },   /* 記号+G */
-    [KEY_SEMICOLON]            = { 0, 1, S },   /* 記号+H */
-    [KEY_APOSTROPHE]           = { 2, 1, S },   /* 記号+J */
-    [KEY_LEFTBRACE]            = { 1, 1, S },   /* 記号+K */
-    [KEY_RIGHTBRACE]           = { 6, 1, S },   /* 記号+L */
-    [KEY_COMMA]                = { 3, 0, S },   /* 記号+N = , */
-    [KEY_DOT]                  = { 1, 0, S },   /* 記号+M = . */
-    [KEY_SLASH]                = { 6, 0, S },   /* 記号+minus = / */
-    [KEY_KP1]                  = { 3, 5, S },
-    [KEY_KP2]                  = { 5, 5, S },
-    [KEY_KP3]                  = { 1, 6, S },
-    [KEY_KP4]                  = { 6, 2, S },
-    [KEY_KP5]                  = { 4, 2, S },
-    [KEY_KP6]                  = { 0, 2, S },
-    [KEY_KP7]                  = { 2, 2, S },
-    [KEY_KP8]                  = { 3, 1, S },
-    [KEY_KP9]                  = { 5, 1, S },
-    [KEY_KP0]                  = { 5, 0, S },
-    [KEY_KPDOT]                = { 1, 0, S },
-    [KEY_KPSLASH]              = { 6, 0, S },
-    [KEY_KPASTERISK]           = { 1, 5, S },
-    [KEY_KPMINUS]              = { 6, 0, D },
-    [KEY_KPPLUS]               = { 1, 5, S },
-    [KEY_KPEQUAL]              = { 1, 5, S },
-    [KEY_KPCOMMA]              = { 3, 0, S },   /* 記号+N = , */
+    [KEY_1]                    = { 3, 5, S | N }, /* 記号+Q = 1 */
+    [KEY_2]                    = { 5, 5, S | N }, /* 記号+W = 2 */
+    [KEY_3]                    = { 1, 6, S | N }, /* 記号+E = 3 */
+    [KEY_4]                    = { 6, 2, S | N }, /* 記号+R = 4 */
+    [KEY_5]                    = { 4, 2, S | N }, /* 記号+T = 5 */
+    [KEY_6]                    = { 0, 2, S | N }, /* 記号+Y = 6 */
+    [KEY_7]                    = { 2, 2, S | N }, /* 記号+U = 7 */
+    [KEY_8]                    = { 3, 1, S | N }, /* 記号+I = 8 */
+    [KEY_9]                    = { 5, 1, S | N }, /* 記号+O = 9 */
+    [KEY_0]                    = { 5, 0, S | N }, /* 記号+P = 0 */
+    [KEY_KP1]                  = { 3, 5, S | N },
+    [KEY_KP2]                  = { 5, 5, S | N },
+    [KEY_KP3]                  = { 1, 6, S | N },
+    [KEY_KP4]                  = { 6, 2, S | N },
+    [KEY_KP5]                  = { 4, 2, S | N },
+    [KEY_KP6]                  = { 0, 2, S | N },
+    [KEY_KP7]                  = { 2, 2, S | N },
+    [KEY_KP8]                  = { 3, 1, S | N },
+    [KEY_KP9]                  = { 5, 1, S | N },
+    [KEY_KP0]                  = { 5, 0, S | N },
+    [KEY_KPMINUS]              = { 6, 0, D },   /* the Minus key */
 
     /*
-     * Keys that exist only on JIS (or ISO) host keyboards.  These
-     * keycodes never arrive from a US keyboard, so the assignments
-     * are the same in both host layouts.
+     * Keys that exist only on JIS host keyboards.  These keycodes
+     * never arrive from a US keyboard, so the assignments are the
+     * same in both host layouts.
      */
-    [KEY_YEN]                  = { 4, 1, S },   /* ¥: 記号+G = \ (the
-                                                 * Brain has no ¥
-                                                 * legend; \ is its
-                                                 * glyph.  With Shift:
-                                                 * 記号+Shift+G = |,
-                                                 * the JIS key's own
-                                                 * shifted legend) */
     [KEY_RO]                   = { 6, 0, D | H }, /* _: Shift+Minus
                                                  * (the Brain's shift
                                                  * legend for Minus) */
-    [KEY_102ND]                = { 4, 1, S },   /* ISO extra key: \ */
     [KEY_HENKAN]               = { 6, 3, D },   /* 変換 = Space (the
                                                  * Brain Space key is
                                                  * スペース・変換) */
@@ -276,49 +286,14 @@ static const BrainKeyDef pwsh6_direct[KEY_CNT] = {
 };
 
 /*
- * JIS host layout: overrides over pwsh6_direct for the positional
- * keycodes whose printed glyph differs from US.  The chord for each
- * key produces the glyph printed on the JIS key:
- *   KEY_EQUAL      "^"  = 記号+Shift+Y   (US: "=" = 記号+F)
- *   KEY_LEFTBRACE  "@"  = 記号+Shift+W   (US: "[" = 記号+K)
- *   KEY_RIGHTBRACE "["  = 記号+K         (US: "]" = 記号+L)
- *   KEY_BACKSLASH  "]"  = 記号+L         (US: "\" = 記号+G)
- *   KEY_APOSTROPHE ":"  = 記号+Shift+H   (US: "'" = 記号+J)
- * (KEY_SEMICOLON is ";" in both layouts and needs no override; its
- * shifted form differs and lives in the shifted table.)
+ * There are no JIS (or US) override tables: the positional
+ * differences between host layouts were all punctuation glyphs,
+ * and those chords are gone (see pwsh6_direct).  What remains --
+ * letters, digits, the direct keys and the JIS-only keys in the
+ * base table -- resolves identically for both host layouts, and a
+ * held host Shift is handled by the NOSHIFT flags on the digit
+ * entries and by the plain Shift contact for letters and Minus.
  */
-static const BrainKeyDef pwsh6_jis_direct[KEY_CNT] = {
-    [KEY_EQUAL]                = { 0, 2, S | H },   /* ^ */
-    [KEY_LEFTBRACE]            = { 5, 5, S | H },   /* @ */
-    [KEY_RIGHTBRACE]           = { 1, 1, S },       /* [ */
-    [KEY_BACKSLASH]            = { 6, 1, S },       /* ] */
-    [KEY_APOSTROPHE]           = { 0, 1, S | H },   /* : */
-};
-
-/*
- * JIS host layout, consulted when a host Shift key is held at
- * key-down time.  JIS shifted glyphs that equal the US-shifted form
- * of a symbols-layer chord (e.g. Shift+";" is "+" = 記号+Shift+F)
- * just name the base key: the host Shift contact is already closed,
- * so it supplies the Shift part of the chord.  Glyphs that live on
- * the *plain* symbols layer although the JIS key needs Shift for
- * them (Shift+7 is "'", Shift+- is "=") carry BRAIN_KEY_NOSHIFT so
- * the host Shift contribution is suppressed while they are held.
- */
-static const BrainKeyDef pwsh6_jis_shifted[KEY_CNT] = {
-    [KEY_2]                    = { 2, 1, S },       /* " = 記号+Shift+J */
-    [KEY_6]                    = { 2, 2, S },       /* & = 記号+Shift+U */
-    [KEY_7]                    = { 2, 1, S | N },   /* ' = 記号+J */
-    [KEY_8]                    = { 5, 1, S },       /* ( = 記号+Shift+O */
-    [KEY_9]                    = { 5, 0, S },       /* ) = 記号+Shift+P */
-    [KEY_0]                    = { 5, 0, S | N },   /* (no JIS glyph:
-                                                     * plain 0) */
-    [KEY_MINUS]                = { 1, 5, S | N },   /* = = 記号+F */
-    [KEY_EQUAL]                = { 0, 5, S },       /* ~ = 記号+Shift+D */
-    [KEY_LEFTBRACE]            = { 0, 5, S | N },   /* ` = 記号+D */
-    [KEY_SEMICOLON]            = { 1, 5, S },       /* + = 記号+Shift+F */
-    [KEY_APOSTROPHE]           = { 3, 1, S },       /* * = 記号+Shift+I */
-};
 
 /*
  * Ctrl+letter combinations for the Brain-specific dictionary keys.
@@ -335,6 +310,19 @@ static const BrainKeyDef pwsh6_combo[KEY_CNT] = {
     [KEY_S]                    = { SYM_ROW, SYM_COL, D }, /* Ctrl+S -> 記号 */
     [KEY_M]                    = { 5, 2, S },   /* Ctrl+M  -> マーカー */
     [KEY_F]                    = { 3, 6, S },   /* Ctrl+F  -> 検索 */
+    [KEY_O]                    = { 3, 6, D },   /* Ctrl+O  -> ホーム
+                                                 * (hOme; the Home key
+                                                 * itself is only an
+                                                 * alias -- compact
+                                                 * keyboards lack it) */
+    [KEY_P]                    = { 1, 4, D },   /* Ctrl+P  -> ページ送り
+                                                 * 前 (Previous page;
+                                                 * PageUp key is the
+                                                 * alias) */
+    [KEY_N]                    = { 3, 4, D },   /* Ctrl+N  -> ページ送り
+                                                 * 次 (Next page;
+                                                 * PageDown key is
+                                                 * the alias) */
 };
 
 static const BrainKbdLayout pwsh6_layout = {
@@ -345,11 +333,13 @@ static const BrainKbdLayout pwsh6_layout = {
     .shift_col   = 4,
     .direct      = pwsh6_direct,
     .combo       = pwsh6_combo,
-    .jis_direct  = pwsh6_jis_direct,
-    .jis_shifted = pwsh6_jis_shifted,
-    .us_shifted  = NULL,    /* every US shifted glyph follows from the
+    .jis_direct  = NULL,    /* no per-layout overrides: see the note
+                             * above the combo table */
+    .jis_shifted = NULL,
+    .us_shifted  = NULL,    /* shifted host keys follow from the
                              * plain entry plus the passed-through
-                             * host Shift contact */
+                             * host Shift contact (letters, Minus),
+                             * or its NOSHIFT suppression (digits) */
 };
 
 static const BrainKbdLayout *brain_kbd_layouts[] = {
@@ -1272,10 +1262,12 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * Resolve the host keyboard layout: host keycodes are
-     * positional, and the glyph printed on a positional keycode
-     * differs between US and JIS keyboards.  Default to JIS (the
-     * Brain is a Japanese-market device); US keyboard users set
+     * Resolve the host keyboard layout.  The mapping no longer
+     * depends on it (the punctuation chords that made positional
+     * keycodes differ between US and JIS hosts are gone), but the
+     * property is still validated and accepted so existing command
+     * lines keep working.  Default is JIS (the Brain is a
+     * Japanese-market device); US keyboard users may set
      * -global brain-kbd.host-layout=us.
      */
     if (!s->host_layout_name) {
